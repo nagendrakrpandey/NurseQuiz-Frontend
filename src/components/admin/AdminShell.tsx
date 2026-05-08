@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, ChevronLeft, ChevronRight, LogOut, Menu } from "lucide-react";
+import { ChevronLeft, ChevronRight, LogOut, Menu } from "lucide-react";
+import AccountMenu from "@/components/AccountMenu";
 import { Button } from "@/components/ui/button";
 import { useIdleLogout } from "@/hooks/useIdleLogout";
 import { clearAuthSession, hasAuthSession } from "@/lib/session";
@@ -12,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import AdminSidebar, { adminNavItems } from "./AdminSidebar";
+import AdminSidebar, { getAdminNavItemsForRole, isAdminNavItemAllowedForRole } from "./AdminSidebar";
 
 interface AdminShellUser {
   fullName: string;
@@ -46,11 +47,6 @@ const getUserInitials = (fullName: string) => {
   const nameParts = fullName.split(" ");
   if (nameParts.length === 1) return nameParts[0].charAt(0).toUpperCase();
   return (nameParts[0].charAt(0) + nameParts[nameParts.length - 1].charAt(0)).toUpperCase();
-};
-
-const getFirstName = (fullName: string) => {
-  if (!fullName) return "Admin";
-  return fullName.split(" ")[0];
 };
 
 const readStoredAdminUser = (): AdminShellUser | null => {
@@ -107,10 +103,16 @@ const AdminShell = ({ activeId, title, children }: AdminShellProps) => {
   };
 
   const handleNavSelect = (id: string) => {
+    if (!isAdminNavItemAllowedForRole(id, userData.roleId)) {
+      navigate("/admin");
+      return;
+    }
+
     navigate(adminRouteById[id] || "/admin");
   };
 
-  const activeTitle = title || adminNavItems.find((item) => item.id === activeId)?.label || "Dashboard";
+  const adminNav = getAdminNavItemsForRole(userData.roleId);
+  const activeTitle = title || adminNav.find((item) => item.id === activeId)?.label || "Dashboard";
 
   return (
     <>
@@ -140,6 +142,7 @@ const AdminShell = ({ activeId, title, children }: AdminShellProps) => {
       <div className="flex min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
         <AdminSidebar
           activeId={activeId}
+          items={adminNav}
           sidebarOpen={sidebarOpen}
           mobileMenuOpen={mobileMenuOpen}
           onSelect={handleNavSelect}
@@ -160,20 +163,13 @@ const AdminShell = ({ activeId, title, children }: AdminShellProps) => {
             </div>
 
             <div className="flex items-center gap-2 sm:gap-3">
-              <button className="relative rounded-lg p-2 transition-colors hover:bg-gray-100">
-                <Bell className="h-5 w-5 text-gray-600" />
-                <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
-              </button>
-              <div className="hidden h-8 w-px bg-gray-200 sm:block" />
-              <div className="flex items-center gap-2 sm:gap-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 text-sm font-bold text-white shadow-md sm:h-9 sm:w-9">
-                  {getUserInitials(userData.fullName)}
-                </div>
-                <div className="hidden sm:block">
-                  <p className="text-sm font-medium text-gray-700">{getFirstName(userData.fullName)}</p>
-                  <p className="text-xs text-gray-400">Administrator</p>
-                </div>
-              </div>
+              <AccountMenu
+                fullName={userData.fullName}
+                subtitle="Administrator"
+                initials={getUserInitials(userData.fullName)}
+                dashboardPath="/admin"
+                onLogout={() => setShowLogoutDialog(true)}
+              />
             </div>
           </header>
 

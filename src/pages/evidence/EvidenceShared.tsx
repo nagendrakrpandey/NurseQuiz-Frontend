@@ -165,6 +165,7 @@ interface CandidateListRow {
   id?: number;
   userId?: number;
   user_id?: number;
+  organizationName?: string;
   name: string;
   email: string;
   phone?: string;
@@ -757,9 +758,28 @@ const normalizeBatch = (value: Record<string, unknown>): BatchOption => ({
 });
 
 const normalizeCandidate = (value: Record<string, unknown>): CandidateListRow => {
-  const nestedSources = ["user", "organization", "registration", "teamMember"]
-    .map((key) => (value[key] && typeof value[key] === "object" ? (value[key] as Record<string, unknown>) : null))
-    .filter(Boolean) as Record<string, unknown>[];
+  const nestedSourceEntries = ["user", "organization", "registration", "teamMember"]
+    .map((key) =>
+      value[key] && typeof value[key] === "object"
+        ? [key, value[key] as Record<string, unknown>] as const
+        : null
+    )
+    .filter(Boolean) as Array<readonly [string, Record<string, unknown>]>;
+  const nestedSources = nestedSourceEntries.map(([, source]) => source);
+  const organizationSources = [
+    value,
+    ...nestedSourceEntries
+      .filter(([key]) => key === "organization" || key === "registration")
+      .map(([, source]) => source),
+  ];
+  const readTextFromSources = (sources: Record<string, unknown>[], aliases: string[]) => {
+    for (const source of sources) {
+      const field = readField(source, aliases);
+      if (field !== null && field !== undefined && String(field).trim()) return String(field).trim();
+    }
+
+    return "";
+  };
   const userId =
     readNumberField(value, [
       "userId",
@@ -774,15 +794,35 @@ const normalizeCandidate = (value: Record<string, unknown>): CandidateListRow =>
     nestedSources
       .map((source) => readNumberField(source, ["userId", "user_id", "id"]))
       .find(Boolean);
+  const organizationName =
+    readTextFromSources(organizationSources, [
+      "organizationName",
+      "organization_name",
+      "orgName",
+      "org_name",
+      "institutionName",
+      "instituteName",
+      "collegeName",
+      "hospitalName",
+      "companyName",
+    ]) ||
+    readTextFromSources(
+      nestedSourceEntries
+        .filter(([key]) => key === "organization")
+        .map(([, source]) => source),
+      ["name", "fullName"]
+    );
+  const name = readTextFromSources([value, ...nestedSources], ["name", "fullName", "candidateName"]) || organizationName || "Candidate";
 
   return {
     candidate_id: Number(value.candidate_id || value.candidateId || value.candidateID || value.id) || undefined,
     id: Number(value.id) || undefined,
     userId,
     user_id: userId,
-    name: String(value.name || value.fullName || "Candidate"),
-    email: String(value.email || ""),
-    phone: value.phone ? String(value.phone) : "",
+    organizationName,
+    name,
+    email: readTextFromSources([value, ...nestedSources], ["email", "orgEmail", "organizationEmail", "userEmail", "contactEmail"]),
+    phone: readTextFromSources([value, ...nestedSources], ["phone", "contact", "mobile", "orgPhone"]),
     enrollment_no: String(value.enrollment_no || value.enrollmentNo || ""),
     enrollmentNo: String(value.enrollmentNo || value.enrollment_no || ""),
     batchId: Number(value.batchId || value.batch_id) || undefined,

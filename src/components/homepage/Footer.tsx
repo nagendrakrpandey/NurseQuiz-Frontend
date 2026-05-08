@@ -1,45 +1,77 @@
-import { Heart, Mail, Phone, MapPin } from "lucide-react";
+import { Heart, Mail, MapPin, Phone, Stethoscope } from "lucide-react";
+import { Link } from "react-router-dom";
+
+const quickLinks = [
+  { label: "About", href: "#about" },
+  { label: "Important Dates", href: "#dates" },
+  { label: "Leaderboard", to: "/leaderboard" },
+  { label: "Announcements", to: "/announcements" },
+];
+
+const competitionLinks = [
+  { label: "Register", to: "/Signup" },
+  { label: "Login", to: "/login" },
+  { label: "Certificates", to: "/certificates" },
+  { label: "Dashboard", to: "/dashboard" },
+];
 
 const Footer = () => (
-  <footer className="bg-foreground py-10 text-background/80 sm:py-16">
-    <div className="container px-3 sm:px-4 md:px-6">
-      <div className="mb-10 grid gap-8 sm:grid-cols-2 lg:grid-cols-4 lg:mb-12">
+  <footer className="bg-slate-950 py-12 text-slate-300 sm:py-16">
+    <div className="container px-4 sm:px-6">
+      <div className="grid gap-8 md:grid-cols-2 lg:grid-cols-[1.2fr_0.8fr_0.8fr_1fr]">
         <div>
-          <h3 className="font-heading font-bold text-background text-lg mb-4">NurseQuiz</h3>
-          <p className="text-sm leading-relaxed text-background/60">
-            India's premier online quiz competition platform for nursing professionals.
+          <Link to="/" className="inline-flex items-center gap-2 text-white">
+            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-600">
+              <Stethoscope className="h-5 w-5" />
+            </span>
+            <span className="font-heading text-xl font-black">NurseQuiz</span>
+          </Link>
+          <p className="mt-4 max-w-sm text-sm leading-6 text-slate-400">
+            A secure competition platform for nursing teams, healthcare institutions, and national-level clinical excellence programs.
           </p>
         </div>
+
         <div>
-          <h4 className="font-heading font-semibold text-background mb-4">Quick Links</h4>
-          <ul className="space-y-2 text-sm">
-            <li><a href="#about" className="hover:text-background transition-colors">About</a></li>
-            <li><a href="#dates" className="hover:text-background transition-colors">Important Dates</a></li>
-            <li><a href="#" className="hover:text-background transition-colors">Eligibility</a></li>
-            <li><a href="#" className="hover:text-background transition-colors">FAQs</a></li>
-          </ul>
-        </div>
-        <div>
-          <h4 className="font-heading font-semibold text-background mb-4">Competition</h4>
-          <ul className="space-y-2 text-sm">
-            <li><a href="#" className="hover:text-background transition-colors">Guidelines</a></li>
-            <li><a href="#" className="hover:text-background transition-colors">Leaderboard</a></li>
-            <li><a href="#" className="hover:text-background transition-colors">Certificates</a></li>
-            <li><a href="#" className="hover:text-background transition-colors">Results</a></li>
-          </ul>
-        </div>
-        <div>
-          <h4 className="font-heading font-semibold text-background mb-4">Contact</h4>
+          <h4 className="mb-4 font-bold text-white">Quick Links</h4>
           <ul className="space-y-3 text-sm">
-            <li className="flex items-center gap-2"><Mail className="h-4 w-4" /> support@nursequiz.in</li>
-            <li className="flex items-center gap-2"><Phone className="h-4 w-4" /> +91 1800-XXX-XXXX</li>
-            <li className="flex items-center gap-2"><MapPin className="h-4 w-4" /> New Delhi, India</li>
+            {quickLinks.map((link) => (
+              <li key={link.label}>
+                {link.to ? (
+                  <Link to={link.to} className="transition-colors hover:text-emerald-300">{link.label}</Link>
+                ) : (
+                  <a href={link.href} className="transition-colors hover:text-emerald-300">{link.label}</a>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div>
+          <h4 className="mb-4 font-bold text-white">Competition</h4>
+          <ul className="space-y-3 text-sm">
+            {competitionLinks.map((link) => (
+              <li key={link.label}>
+                <Link to={link.to} className="transition-colors hover:text-emerald-300">{link.label}</Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div>
+          <h4 className="mb-4 font-bold text-white">Contact</h4>
+          <ul className="space-y-3 text-sm text-slate-400">
+            <li className="flex items-center gap-2"><Mail className="h-4 w-4 text-emerald-400" /> support@nursequiz.in</li>
+            <li className="flex items-center gap-2"><Phone className="h-4 w-4 text-emerald-400" /> +91 1800-000-0000</li>
+            <li className="flex items-center gap-2"><MapPin className="h-4 w-4 text-emerald-400" /> New Delhi, India</li>
           </ul>
         </div>
       </div>
-      <div className="flex flex-col items-center justify-between gap-4 border-t border-background/10 pt-6 text-center text-sm text-background/50 md:flex-row md:text-left">
-        <p>© 2026 NurseQuiz. All rights reserved.</p>
-        <p className="flex flex-wrap items-center justify-center gap-1 md:justify-end">Made with <Heart className="h-3 w-3 text-destructive" /> for Indian Healthcare</p>
+
+      <div className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-6 text-center text-sm text-slate-500 md:flex-row md:text-left">
+        <p>Copyright 2026 NurseQuiz. All rights reserved.</p>
+        <p className="flex items-center gap-1">
+          Made with <Heart className="h-3.5 w-3.5 text-emerald-400" /> for Indian healthcare professionals
+        </p>
       </div>
     </div>
   </footer>

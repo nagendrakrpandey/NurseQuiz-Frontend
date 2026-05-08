@@ -11,13 +11,18 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Textarea } from "@/components/ui/textarea";
 import {
   Users, CheckCircle2, CreditCard, Trophy, Mail, Search, Filter,
-  ThumbsUp, ThumbsDown, Eye, BarChart3, Bell, Upload, Send, Menu,
+  ThumbsUp, ThumbsDown, Eye, BarChart3, Upload, Send, Menu,
   XCircle, Clock, AlertCircle, Building2, FileText, Download, Plus, Trash2, Edit, Loader2,
   ChevronLeft, ChevronRight, LogOut, Settings, HelpCircle, TrendingUp, TrendingDown,
   Wallet, Receipt, Award, MessageSquare, Phone, AtSign, Sparkles, Star, Briefcase,
   Shield, Check, Ban, RefreshCw, MoreHorizontal, FileCheck, FileX, UserCheck
 } from "lucide-react";
-import AdminSidebar, { adminNavItems } from "@/components/admin/AdminSidebar";
+import AccountMenu from "@/components/AccountMenu";
+import AdminSidebar, {
+  adminNavItems,
+  getAdminNavItemsForRole,
+  isAdminNavItemAllowedForRole,
+} from "@/components/admin/AdminSidebar";
 import LiveLeaderboard from "@/components/admin/LiveLeaderboard";
 import { useIdleLogout } from "@/hooks/useIdleLogout";
 import { clearAuthSession, hasAuthSession } from "@/lib/session";
@@ -32,10 +37,14 @@ import EvidencePage from "./Evidence";
 
 // Types
 interface OrganizationData {
+  [key: string]: any;
   id: number;
   userId: number;
   organizationName: string;
-  registrationNumber: string;
+  registrationNumber?: string;
+  hospitalRegisteredId?: string;
+  spocName?: string;
+  hospitalCategory?: string;
   pincode: string;
   state: string;
   district: string;
@@ -54,17 +63,26 @@ interface OrganizationData {
 }
 
 interface TeamMember {
+  [key: string]: any;
   id: number;
   name: string;
   email: string;
+  hospitalEmployeeId?: string;
+  employeeId?: string;
   role: string;
+  evidenceFileName?: string;
+  employeeDocumentPath?: string;
+  hospitalEmployeeDocumentPath?: string;
+  evidencePath?: string;
   organizationId: number;
   userId: number;
 }
 
 interface Document {
+  [key: string]: any;
   id: number;
   registrationCertPath: string;
+  hospitalRegistrationCertificatePath?: string;
   teamLeadIdPath: string;
   nursingCouncilRegPath: string;
   userId: number;
@@ -77,6 +95,333 @@ interface DialogState {
   message: string;
   type: "info" | "error" | "success" | "warning";
 }
+
+const getHospitalRegisteredId = (org?: OrganizationData | null) =>
+  org?.hospitalRegisteredId || org?.registrationNumber || "N/A";
+
+const getTeamMemberEmployeeId = (member: TeamMember) =>
+  String(
+    member.hospitalEmployeeId ||
+    member.employeeId ||
+    member.hospital_employee_id ||
+    member.employee_id ||
+    "N/A"
+  );
+
+const getTeamMemberEvidenceFileName = (member: TeamMember) => {
+  const rawName = String(
+    member.evidenceFileName ||
+    member.fileName ||
+    member.documentName ||
+    member.employeeDocumentName ||
+    ""
+  ).trim();
+
+  if (rawName) return rawName;
+
+  const path = String(
+    member.employeeDocumentPath ||
+    member.hospitalEmployeeDocumentPath ||
+    member.evidencePath ||
+    member.documentPath ||
+    member.documentUrl ||
+    member.uploadDocumentPath ||
+    member.memberDocumentPath ||
+    member.hospitalEmployeeIdDocumentPath ||
+    member.filePath ||
+    ""
+  ).trim();
+
+  return path.split(/[\\/]/).pop() || "";
+};
+
+const getTeamMemberDocumentPath = (member: TeamMember) => {
+  const path = String(
+    member.employeeDocumentPath ||
+    member.hospitalEmployeeDocumentPath ||
+    member.evidencePath ||
+    member.documentPath ||
+    member.documentUrl ||
+    member.uploadDocumentPath ||
+    member.memberDocumentPath ||
+    member.hospitalEmployeeIdDocumentPath ||
+    member.filePath ||
+    ""
+  ).trim();
+
+  if (path) return path;
+
+  const evidenceFileName = getTeamMemberEvidenceFileName(member);
+  return evidenceFileName ? `uploads/team-documents/${evidenceFileName}` : "";
+};
+
+const asRecord = (value: unknown): Record<string, any> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+
+const unwrapArray = (payload: unknown) => {
+  if (Array.isArray(payload)) return payload;
+
+  const record = asRecord(payload);
+  const candidates = [
+    record.data,
+    record.result,
+    record.items,
+    record.members,
+    record.team,
+    record.teamMembers,
+    record.rows,
+    record.content,
+  ];
+
+  const match = candidates.find(Array.isArray);
+  return Array.isArray(match) ? match : [];
+};
+
+const unwrapDocument = (payload: unknown): Document | null => {
+  if (Array.isArray(payload)) {
+    const firstDocument = payload.find((item) => Object.keys(asRecord(item)).length);
+    return firstDocument ? asRecord(firstDocument) as Document : null;
+  }
+
+  const record = asRecord(payload);
+  const source = asRecord(record.data || record.result || record.document || record.documents || payload);
+  return Object.keys(source).length ? source as Document : null;
+};
+
+const readResponsePayload = async (response: Response) => {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { success: false, message: text };
+  }
+};
+
+const getCleanToken = () =>
+  String(localStorage.getItem("token") || localStorage.getItem("authToken") || "").replace(/^Bearer\s+/i, "").trim();
+
+const decodeJwtUserId = (token: string) => {
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) return "";
+
+    const normalizedPayload = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const paddedPayload = normalizedPayload.padEnd(Math.ceil(normalizedPayload.length / 4) * 4, "=");
+    const decodedPayload = JSON.parse(atob(paddedPayload));
+    return String(decodedPayload.userId || decodedPayload.id || "").trim();
+  } catch {
+    return "";
+  }
+};
+
+const getLocalUserId = (token = "") => {
+  const storedUser = localStorage.getItem("userData") || localStorage.getItem("adminData");
+  try {
+    const parsed = storedUser ? JSON.parse(storedUser) : null;
+    return String(parsed?.id || localStorage.getItem("userId") || decodeJwtUserId(token) || "").trim();
+  } catch {
+    return String(localStorage.getItem("userId") || decodeJwtUserId(token) || "").trim();
+  }
+};
+
+const readUserId = (value: unknown) => {
+  const record = asRecord(value);
+  const user = asRecord(record.user);
+  const parsed = Number(record.userId || record.user_id || record.userID || user.id || user.userId || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const readOrganizationId = (value: unknown) => {
+  const record = asRecord(value);
+  const parsed = Number(record.organizationId || record.organization_id || record.registrationId || record.registration_id || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const normalizeTeamMember = (value: unknown): TeamMember => {
+  const record = asRecord(value);
+  return {
+    ...record,
+    id: Number(record.id || 0),
+    name: String(record.name || record.fullName || record.memberName || ""),
+    email: String(record.email || record.memberEmail || record.userEmail || ""),
+    hospitalEmployeeId: String(record.hospitalEmployeeId || record.hospital_employee_id || record.employeeId || record.employee_id || ""),
+    role: String(record.role || record.department || record.departmentName || ""),
+    organizationId: readOrganizationId(record),
+    userId: readUserId(record),
+  };
+};
+
+const uniqueTeamMembers = (teamData: TeamMember[]) => {
+  const seen = new Set<string>();
+
+  return teamData.filter((member) => {
+    const key = String(
+      member.id ||
+      `${member.email}-${member.role}-${getTeamMemberEmployeeId(member)}-${getTeamMemberDocumentPath(member)}`
+    ).trim().toLowerCase();
+
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const getTeamMemberId = (member: TeamMember) => Number(member.id || 0);
+
+const getTeamMemberSlotKey = (member: TeamMember) => {
+  const evidenceField = String(member.evidenceField || member.documentField || "").trim().toLowerCase();
+  const evidenceMatch = evidenceField.match(/employeeDocument(\d+)/i);
+  if (evidenceMatch) return `document-${evidenceMatch[1]}`;
+  if (evidenceField) return evidenceField;
+
+  const roleKey = String(member.roleType || member.role || "").trim().toUpperCase();
+  if (["OT", "ICCU", "CSSD"].includes(roleKey)) return `role-${roleKey}`;
+
+  return "";
+};
+
+const getTeamMemberSortOrder = (member: TeamMember) => {
+  const slotKey = getTeamMemberSlotKey(member);
+  const documentMatch = slotKey.match(/^document-(\d+)$/);
+  if (documentMatch) return Number(documentMatch[1]);
+
+  const roleOrder: Record<string, number> = {
+    "role-OT": 1,
+    "role-ICCU": 2,
+    "role-CSSD": 3,
+  };
+  return roleOrder[slotKey] || 99;
+};
+
+const sortTeamMembersForDisplay = (teamData: TeamMember[]) =>
+  [...teamData].sort((a, b) => {
+    const orderDiff = getTeamMemberSortOrder(a) - getTeamMemberSortOrder(b);
+    if (orderDiff !== 0) return orderDiff;
+    return getTeamMemberId(a) - getTeamMemberId(b);
+  });
+
+const selectCurrentTeamMembers = (teamData: TeamMember[]) => {
+  const uniqueMembers = uniqueTeamMembers(teamData);
+  if (uniqueMembers.length <= 3) return sortTeamMembersForDisplay(uniqueMembers);
+
+  const latestBySlot = new Map<string, TeamMember>();
+  uniqueMembers.forEach((member) => {
+    const slotKey = getTeamMemberSlotKey(member);
+    if (!slotKey) return;
+
+    const existing = latestBySlot.get(slotKey);
+    if (!existing || getTeamMemberId(member) > getTeamMemberId(existing)) {
+      latestBySlot.set(slotKey, member);
+    }
+  });
+
+  const slotMembers = sortTeamMembersForDisplay(Array.from(latestBySlot.values()));
+  if (slotMembers.length >= 3) return slotMembers.slice(0, 3);
+
+  return uniqueMembers
+    .sort((a, b) => getTeamMemberId(b) - getTeamMemberId(a))
+    .slice(0, 3)
+    .sort((a, b) => getTeamMemberId(a) - getTeamMemberId(b));
+};
+
+const getEmbeddedTeamMembers = (org: OrganizationData | null) => {
+  const record = asRecord(org);
+  return unwrapArray(record.teamMembers || record.members || record.team || record.teamMemberList).map(normalizeTeamMember);
+};
+
+const getEmbeddedDocuments = (org: OrganizationData | null) => {
+  const record = asRecord(org);
+  return unwrapDocument(record.documents || record.document || record.uploadedDocuments || record.registrationDocument);
+};
+
+const isMatchingTeamMember = (member: TeamMember, userId: number | string | null, organizationId?: number) => {
+  const memberUserId = readUserId(member);
+  const memberOrgId = readOrganizationId(member);
+  const selectedUserId = Number(userId || 0);
+
+  if (selectedUserId > 0) return memberUserId === selectedUserId;
+  return Number(organizationId || 0) > 0 && memberOrgId === Number(organizationId);
+};
+
+const isMatchingDocument = (document: Document, userId: number | string | null, organizationId?: number) => {
+  const documentUserId = readUserId(document);
+  const documentOrgId = readOrganizationId(document);
+  const selectedUserId = Number(userId || 0);
+
+  if (selectedUserId > 0) return documentUserId === selectedUserId;
+  return Number(organizationId || 0) > 0 && documentOrgId === Number(organizationId);
+};
+
+const getResourceErrorMessage = (payload: unknown, fallback: string) => {
+  const record = asRecord(payload);
+  const message = String(record.message || record.error || fallback).trim();
+  if (message.toLowerCase().includes("no static resource")) return fallback;
+  return message || fallback;
+};
+
+const getRegistrationDocumentPath = (documents: Document | null, aliases: string[]) => {
+  if (!documents) return "";
+  const normalizedAliases = aliases.map((alias) => alias.replace(/[_\-\s]/g, "").toLowerCase());
+
+  return String(
+    Object.entries(documents).find(([key, value]) =>
+      typeof value === "string" &&
+      value.trim() &&
+      normalizedAliases.includes(key.replace(/[_\-\s]/g, "").toLowerCase())
+    )?.[1] || ""
+  );
+};
+
+const buildUploadedDocumentItems = (documents: Document | null, members: TeamMember[]) => {
+  const baseDocumentItems = documents
+    ? [
+        {
+          label: "Hospital Registration Certificate",
+          desc: "Hospital registration proof",
+          path: getRegistrationDocumentPath(documents, [
+            "hospitalRegistrationCertificatePath",
+            "registrationCertPath",
+            "hospitalRegistrationCertificate",
+            "registrationCertificatePath",
+          ]),
+        },
+        {
+          label: "Team Lead ID Proof",
+          desc: "Government issued ID",
+          path: getRegistrationDocumentPath(documents, ["teamLeadIdPath", "teamLeadIdProofPath", "teamLeadDocumentPath"]),
+        },
+        {
+          label: "Nursing Council Registration",
+          desc: "Professional registration",
+          path: getRegistrationDocumentPath(documents, ["nursingCouncilRegPath", "nursingCouncilRegistrationPath"]),
+        },
+      ]
+    : [];
+
+  const teamDocumentItems = members
+    .map((member, index) => ({
+      label: `${member.name || `Member ${index + 1}`} Document`,
+      desc: `${formatTeamRoleForDocument(member.role)} team member document`,
+      path: getTeamMemberDocumentPath(member),
+    }))
+    .filter((item) => item.path);
+
+  const seenPaths = new Set<string>();
+  return [...baseDocumentItems, ...teamDocumentItems].filter((item) => {
+    if (!item.path) return true;
+    const key = item.path.trim().toLowerCase();
+    if (seenPaths.has(key)) return false;
+    seenPaths.add(key);
+    return true;
+  });
+};
+
+const formatTeamRoleForDocument = (role?: string) => {
+  const text = String(role || "").trim();
+  return text || "Team";
+};
 
 interface UserData {
   fullName: string;
@@ -246,7 +591,9 @@ const downloadRegistrationPDF = (org: OrganizationData, members: TeamMember[], d
   doc.setFont("helvetica", "normal");
   const orgDetails = [
     { label: "Organization Name:", value: org?.organizationName || "N/A" },
-    { label: "Registration Number:", value: org?.registrationNumber || "N/A" },
+    { label: "Hospital Registered ID:", value: getHospitalRegisteredId(org) },
+    { label: "SPOC Name:", value: org?.spocName || "N/A" },
+    { label: "Hospital Category:", value: org?.hospitalCategory || "N/A" },
     { label: "Email:", value: org?.orgEmail || "N/A" },
     { label: "Phone:", value: org?.orgPhone || "N/A" },
     { label: "Address:", value: org?.address || "N/A" },
@@ -337,12 +684,13 @@ const downloadRegistrationPDF = (org: OrganizationData, members: TeamMember[], d
       (index + 1).toString(),
       member.name || "N/A",
       member.email || "N/A",
+      getTeamMemberEmployeeId(member),
       formatRole(member.role)
     ]);
     
     autoTable(doc, {
       startY: yPos,
-      head: [["#", "Full Name", "Email", "Department"]],
+      head: [["#", "Full Name", "Email", "Employee ID", "Department"]],
       body: tableData,
       theme: 'striped',
       headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255], fontSize: 9 },
@@ -370,7 +718,7 @@ const downloadRegistrationPDF = (org: OrganizationData, members: TeamMember[], d
     
     doc.setFontSize(9);
     const documentsList = [
-      { label: "Registration Certificate:", uploaded: !!documents.registrationCertPath },
+      { label: "Hospital Registration Certificate:", uploaded: !!(documents.hospitalRegistrationCertificatePath || documents.registrationCertPath) },
       { label: "Team Lead ID Proof:", uploaded: !!documents.teamLeadIdPath },
       { label: "Nursing Council Registration:", uploaded: !!documents.nursingCouncilRegPath }
     ];
@@ -405,6 +753,141 @@ const downloadRegistrationPDF = (org: OrganizationData, members: TeamMember[], d
   doc.save(`${org?.organizationName || "Registration"}_Details.pdf`);
 };
 
+const downloadRegistrationPDFDesigned = (org: OrganizationData, members: TeamMember[], documents: Document | null, paymentStatus: number | null) => {
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const contentWidth = pageWidth - margin * 2;
+  const generatedOn = new Date().toLocaleString();
+  const paymentText = paymentStatus === 1 ? "PAID" : paymentStatus === 0 ? "PENDING" : "NOT INITIATED";
+  const registrationText = org?.status === 2 ? "APPROVED" : org?.status === 3 ? "REJECTED" : "PENDING";
+
+  const sectionTitle = (title: string, y: number) => {
+    doc.setFillColor(240, 253, 250);
+    doc.roundedRect(margin, y, contentWidth, 9, 2, 2, "F");
+    doc.setFillColor(16, 185, 129);
+    doc.roundedRect(margin, y, 2.5, 9, 1, 1, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(6, 95, 70);
+    doc.text(title, margin + 6, y + 6.2);
+  };
+
+  const statusCard = (x: number, y: number, label: string, value: string, tone: "green" | "amber" | "red" | "slate") => {
+    const colors = {
+      green: { bg: [236, 253, 245], fg: [5, 150, 105] },
+      amber: { bg: [255, 251, 235], fg: [217, 119, 6] },
+      red: { bg: [254, 242, 242], fg: [220, 38, 38] },
+      slate: { bg: [248, 250, 252], fg: [71, 85, 105] },
+    }[tone];
+
+    doc.setFillColor(colors.bg[0], colors.bg[1], colors.bg[2]);
+    doc.setDrawColor(226, 232, 240);
+    doc.roundedRect(x, y, 56, 21, 3, 3, "FD");
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    doc.setTextColor(100, 116, 139);
+    doc.text(label, x + 4, y + 7);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(colors.fg[0], colors.fg[1], colors.fg[2]);
+    doc.text(value, x + 4, y + 15);
+  };
+
+  doc.setFillColor(16, 185, 129);
+  doc.rect(0, 0, pageWidth, 48, "F");
+  doc.setFillColor(5, 150, 105);
+  doc.rect(0, 42, pageWidth, 6, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(20);
+  doc.text("Registration Details", margin, 20);
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "normal");
+  doc.text(org?.organizationName || "Organization", margin, 29);
+  doc.setFontSize(8);
+  doc.setTextColor(220, 252, 231);
+  doc.text(`Hospital ID: ${getHospitalRegisteredId(org)} | User ID: ${org?.user?.id || org?.userId || "N/A"}`, margin, 37);
+  doc.text(`Generated: ${generatedOn}`, pageWidth - margin, 20, { align: "right" });
+
+  let yPos = 58;
+  statusCard(margin, yPos, "Payment", paymentText, paymentStatus === 1 ? "green" : paymentStatus === 0 ? "red" : "amber");
+  statusCard(margin + 63, yPos, "Registration", registrationText, org?.status === 2 ? "green" : org?.status === 3 ? "red" : "amber");
+  statusCard(margin + 126, yPos, "Team Size", `${members?.length || 0} members`, "slate");
+  yPos += 32;
+
+  sectionTitle("Organization Details", yPos);
+  yPos += 13;
+
+  autoTable(doc, {
+    startY: yPos,
+    body: [
+      ["Organization", org?.organizationName || "N/A", "SPOC", org?.spocName || "N/A"],
+      ["Hospital ID", getHospitalRegisteredId(org), "Category", org?.hospitalCategory || "N/A"],
+      ["Email", org?.orgEmail || "N/A", "Phone", org?.orgPhone || "N/A"],
+      ["Location", `${org?.district || "N/A"}, ${org?.state || "N/A"} (${org?.pincode || "N/A"})`, "Registered", org?.createdAt ? new Date(org.createdAt).toLocaleString() : "N/A"],
+      ["Address", org?.address || "N/A", "User", `${org?.user?.fullName || "N/A"} (${org?.user?.email || "N/A"})`],
+    ],
+    theme: "plain",
+    styles: { fontSize: 8, cellPadding: 2.4, lineColor: [226, 232, 240], lineWidth: 0.1 },
+    columnStyles: {
+      0: { fontStyle: "bold", textColor: [71, 85, 105], cellWidth: 28 },
+      1: { textColor: [15, 23, 42], cellWidth: 58 },
+      2: { fontStyle: "bold", textColor: [71, 85, 105], cellWidth: 24 },
+      3: { textColor: [15, 23, 42], cellWidth: 62 },
+    },
+    margin: { left: margin, right: margin },
+  });
+  yPos = (doc as any).lastAutoTable.finalY + 11;
+
+  sectionTitle("Team Members And Evidence", yPos);
+  yPos += 13;
+
+  const teamRows = (members || []).map((member, index) => [
+    String(index + 1),
+    member.name || "N/A",
+    member.email || "N/A",
+    getTeamMemberEmployeeId(member),
+    member.role || "N/A",
+    getTeamMemberEvidenceFileName(member) || "N/A",
+  ]);
+
+  autoTable(doc, {
+    startY: yPos,
+    head: [["#", "Full Name", "Email", "Employee ID", "Dept.", "Evidence File"]],
+    body: teamRows.length ? teamRows : [["-", "No team members found", "-", "-", "-", "-"]],
+    theme: "grid",
+    headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255], fontSize: 8.5, fontStyle: "bold", halign: "left" },
+    bodyStyles: { fontSize: 7.5, textColor: [30, 41, 59], cellPadding: 2.5 },
+    alternateRowStyles: { fillColor: [248, 250, 252] },
+    styles: { lineColor: [226, 232, 240], lineWidth: 0.1 },
+    columnStyles: {
+      0: { cellWidth: 9, halign: "center" },
+      1: { cellWidth: 28, fontStyle: "bold" },
+      2: { cellWidth: 43 },
+      3: { cellWidth: 23 },
+      4: { cellWidth: 18 },
+      5: { cellWidth: 57 },
+    },
+    margin: { left: margin, right: margin },
+  });
+
+  const pageCount = doc.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setDrawColor(226, 232, 240);
+    doc.line(margin, pageHeight - 16, pageWidth - margin, pageHeight - 16);
+    doc.setFontSize(7);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(100, 116, 139);
+    doc.text("Nurse Quiz Admin Portal", margin, pageHeight - 10);
+    doc.text(`Page ${i} of ${pageCount}`, pageWidth - margin, pageHeight - 10, { align: "right" });
+  }
+
+  doc.save(`${org?.organizationName || "Registration"}_Details.pdf`);
+};
+
 // Registration Details Modal
 const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, onRefresh }: any) => {
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -421,6 +904,8 @@ const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, o
   const [downloadingPDF, setDownloadingPDF] = useState(false);
 
   const getUserId = () => {
+    const normalizedUserId = readUserId(org);
+    if (normalizedUserId) return normalizedUserId;
     if (org?.user?.id) return org.user.id;
     if (org?.userId) return org.userId;
     return null;
@@ -435,27 +920,53 @@ const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, o
 
     setLoadingTeam(true);
     setTeamFetchError(null);
-    const token = localStorage.getItem("token");
-    const cleanToken = token?.replace("Bearer ", "");
+    const cleanToken = getCleanToken();
+    const localUserId = getLocalUserId(cleanToken);
+    const endpoints = [
+      { url: `${BASE_URL}/api/register/get/team/public/${userId}`, auth: false, scoped: true },
+      { url: `${BASE_URL}/api/register/get/team`, auth: true, scoped: false },
+      { url: `${BASE_URL}/api/register/get/team/${userId}`, auth: true, scoped: true },
+      { url: `${BASE_URL}/api/register/get/team?userId=${encodeURIComponent(String(userId))}`, auth: true, scoped: true },
+    ];
 
     try {
-      const response = await fetch(`${BASE_URL}/api/register/get/team/${userId}`, {
-        method: "GET",
-        headers: { "Authorization": `Bearer ${cleanToken}`, "Content-Type": "application/json" }
-      });
-      const data = await response.json();
+      for (const endpoint of endpoints) {
+        const response = await fetch(endpoint.url, {
+          method: "GET",
+          headers: endpoint.auth
+            ? { "Authorization": `Bearer ${cleanToken}`, "Content-Type": "application/json" }
+            : { "Content-Type": "application/json" }
+        });
+        const data = await readResponsePayload(response);
 
-      if (response.ok && data.success === true) {
-        const teamData = Array.isArray(data.data) ? data.data : [];
-        setMembers(teamData);
-        return teamData;
-      } else {
-        setTeamFetchError(data.message || "No team members found");
-        setMembers([]);
-        return [];
+        if (!response.ok) continue;
+
+        const teamData = uniqueTeamMembers(unwrapArray(data).map(normalizeTeamMember));
+        const scopedTeamData = teamData.filter((member) => isMatchingTeamMember(member, userId, org?.id));
+        const isTokenEndpoint = endpoint.url.endsWith("/api/register/get/team");
+        const hasScopeFields = teamData.some((member) => readUserId(member) > 0 || readOrganizationId(member) > 0);
+        const canUseTokenResponse = isTokenEndpoint && String(userId) === localUserId;
+        const finalTeamData = scopedTeamData.length
+          ? scopedTeamData
+          : (!hasScopeFields && (endpoint.scoped || (canUseTokenResponse && teamData.length <= 3)) ? teamData : []);
+
+        if (finalTeamData.length) {
+          const currentTeamData = selectCurrentTeamMembers(finalTeamData);
+          setMembers(currentTeamData);
+          return currentTeamData;
+        }
       }
+
+      const embeddedMembers = selectCurrentTeamMembers(getEmbeddedTeamMembers(org).filter((member) => isMatchingTeamMember(member, userId, org?.id)));
+      setMembers(embeddedMembers);
+
+      if (!embeddedMembers.length) {
+        setTeamFetchError("Team data not found for this user.");
+      }
+
+      return embeddedMembers;
     } catch (err) {
-      setTeamFetchError("Network error");
+      setTeamFetchError("Network error while loading team members");
       setMembers([]);
       return [];
     } finally {
@@ -472,26 +983,59 @@ const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, o
 
     setLoadingDocs(true);
     setDocsFetchError(null);
-    const token = localStorage.getItem("token");
-    const cleanToken = token?.replace("Bearer ", "");
+    const cleanToken = getCleanToken();
+    const localUserId = getLocalUserId(cleanToken);
+    const endpoints = [
+      `${BASE_URL}/api/register/get/documents`,
+      `${BASE_URL}/api/register/get/documents/${userId}`,
+      `${BASE_URL}/api/register/get/documents?userId=${encodeURIComponent(String(userId))}`,
+    ];
 
     try {
-      const response = await fetch(`${BASE_URL}/api/register/get/documents/${userId}`, {
-        method: "GET",
-        headers: { "Authorization": `Bearer ${cleanToken}`, "Content-Type": "application/json" }
-      });
-      const data = await response.json();
+      for (const endpoint of endpoints) {
+        const response = await fetch(endpoint, {
+          method: "GET",
+          headers: { "Authorization": `Bearer ${cleanToken}`, "Content-Type": "application/json" }
+        });
+        const data = await readResponsePayload(response);
 
-      if (response.ok && data.success === true) {
-        setDocuments(data.data);
-        return data.data;
-      } else {
-        setDocsFetchError(data.message || "No documents found");
-        setDocuments(null);
-        return null;
+        if (!response.ok) continue;
+
+        const docsList = unwrapArray(data)
+          .map((item) => asRecord(item) as Document)
+          .filter((item) => Object.keys(item).length);
+        const docsData = (
+          docsList.find((item) => isMatchingDocument(item, userId, org?.id)) ||
+          (docsList.length ? null : unwrapDocument(data))
+        );
+        const isTokenEndpoint = endpoint.endsWith("/api/register/get/documents");
+        const isScopedEndpoint = endpoint.includes(`/${userId}`) || endpoint.includes(`userId=${encodeURIComponent(String(userId))}`);
+        const hasScopeFields = Boolean(docsData && (readUserId(docsData) > 0 || readOrganizationId(docsData) > 0));
+        const canUseTokenResponse = isTokenEndpoint && String(userId) === localUserId;
+        const canUseDocument = Boolean(docsData && (isMatchingDocument(docsData, userId, org?.id) || (!hasScopeFields && (isScopedEndpoint || canUseTokenResponse))));
+
+        if (docsData && canUseDocument) {
+          setDocuments(docsData);
+          return docsData;
+        }
       }
+
+      const embeddedDocuments = getEmbeddedDocuments(org);
+      const scopedEmbeddedDocuments = embeddedDocuments && (
+        isMatchingDocument(embeddedDocuments, userId, org?.id) ||
+        (readUserId(embeddedDocuments) === 0 && readOrganizationId(embeddedDocuments) === 0)
+      )
+        ? embeddedDocuments
+        : null;
+      setDocuments(scopedEmbeddedDocuments);
+
+      if (!scopedEmbeddedDocuments) {
+        setDocsFetchError("Uploaded documents not found. Please login with the selected hospital token or provide an admin endpoint for user-wise documents.");
+      }
+
+      return scopedEmbeddedDocuments;
     } catch (err) {
-      setDocsFetchError("Network error");
+      setDocsFetchError("Network error while loading documents");
       setDocuments(null);
       return null;
     } finally {
@@ -549,7 +1093,7 @@ const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, o
     setDownloadingPDF(true);
     try {
       const [teamData, docsData] = await Promise.all([fetchTeamMembers(), fetchDocuments()]);
-      downloadRegistrationPDF(org, teamData || members, docsData || documents, paymentStatus ?? 0);
+      downloadRegistrationPDFDesigned(org, teamData || members, docsData || documents, paymentStatus ?? 0);
     } catch (error) {
       alert("Failed to generate PDF");
     } finally {
@@ -560,7 +1104,8 @@ const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, o
   const getFileUrl = (path: string) => {
     if (!path) return null;
     if (path.startsWith("http")) return path;
-    if (path.startsWith("/uploads/")) return `${BASE_URL}${path}`;
+    if (path.startsWith("/")) return `${BASE_URL}${path}`;
+    if (path.startsWith("uploads/")) return `${BASE_URL}/${path}`;
     return `${BASE_URL}/uploads/${path}`;
   };
 
@@ -573,27 +1118,43 @@ const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, o
     return roleMap[role?.toLowerCase()] || role;
   };
 
+  const organizationDetailItems = [
+    { label: "Hospital ID", value: getHospitalRegisteredId(org), icon: Shield },
+    { label: "SPOC", value: org?.spocName || "N/A", icon: UserCheck },
+    { label: "Category", value: org?.hospitalCategory || "N/A", icon: Briefcase },
+    { label: "Email", value: org?.orgEmail || "N/A", icon: AtSign },
+    { label: "Phone", value: org?.orgPhone || "N/A", icon: Phone },
+    { label: "Location", value: `${org?.district || "N/A"}, ${org?.state || "N/A"} (${org?.pincode || "N/A"})`, icon: Building2 },
+    { label: "Registered", value: org?.createdAt ? new Date(org.createdAt).toLocaleString() : "N/A", icon: Clock },
+    { label: "User ID", value: getUserId() || "N/A", icon: Users },
+  ];
+
   return (
     <>
       <Dialog open={isOpen} onOpenChange={onClose}>
         <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto p-0 gap-0 rounded-2xl">
-          <div className="sticky top-0 z-10 bg-white border-b px-6 py-4 rounded-t-2xl">
+          <div className="sticky top-0 z-10 border-b border-emerald-500 bg-gradient-to-r from-emerald-600 to-teal-600 px-5 py-5 text-white sm:px-6 rounded-t-2xl">
             <DialogHeader>
               <DialogTitle className="flex flex-wrap items-center justify-between gap-3">
-                <span className="text-xl flex items-center gap-2">
-                  <Building2 className="h-5 w-5 text-emerald-600" />
-                  Registration Details
+                <span className="flex min-w-0 items-center gap-3 text-xl">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white/15 text-white ring-1 ring-white/30">
+                    <Building2 className="h-5 w-5" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block truncate">Registration Details</span>
+                    <span className="mt-1 block truncate text-sm font-normal text-emerald-50">{org?.organizationName || "Organization"}</span>
+                  </span>
                 </span>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={handleDownloadPDF} disabled={downloadingPDF} className="gap-2">
+                  <Button variant="outline" size="sm" onClick={handleDownloadPDF} disabled={downloadingPDF} className="gap-2 border-white/25 bg-white/15 text-white hover:bg-white/25 hover:text-white">
                     {downloadingPDF ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                     PDF
                   </Button>
                   <StatusBadge status={org?.status} />
                 </div>
               </DialogTitle>
-              <DialogDescription className="mt-1">
-                Complete details of {org?.organizationName}
+              <DialogDescription className="mt-2 text-emerald-50">
+                Hospital ID {getHospitalRegisteredId(org)} | User ID {getUserId() || "N/A"}
               </DialogDescription>
             </DialogHeader>
           </div>
@@ -606,149 +1167,142 @@ const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, o
               </div>
             ) : (
               <>
-                {/* Organization Details Card */}
-                <div className="bg-gradient-to-r from-gray-50 to-white rounded-xl border p-5">
-                  <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
-                    <div className="p-1.5 bg-emerald-100 rounded-lg">
-                      <Building2 className="h-4 w-4 text-emerald-600" />
+                <section className="bg-white">
+                  <div className="border-b border-emerald-100 pb-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Organization Profile</p>
+                    <div className="mt-2 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0">
+                        <h3 className="truncate text-2xl font-bold text-slate-950">{org?.organizationName || "N/A"}</h3>
+                        <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-600">{org?.address || "Address not available"}</p>
+                      </div>
+                      <div className="flex shrink-0 flex-wrap gap-2">
+                        <PaymentStatusBadge paymentStatus={paymentStatus ?? 0} />
+                        <StatusBadge status={org?.status} />
+                      </div>
                     </div>
-                    Organization Details
-                  </h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
-                    <div><span className="text-gray-500">Name:</span> <span className="font-medium">{org?.organizationName || 'N/A'}</span></div>
-                    <div><span className="text-gray-500">Reg Number:</span> <span className="font-mono text-xs">{org?.registrationNumber || 'N/A'}</span></div>
-                    <div><span className="text-gray-500">Email:</span> {org?.orgEmail || 'N/A'}</div>
-                    <div><span className="text-gray-500">Phone:</span> {org?.orgPhone || 'N/A'}</div>
-                    <div><span className="text-gray-500">Address:</span> {org?.address || 'N/A'}</div>
-                    <div><span className="text-gray-500">Location:</span> {org?.district || 'N/A'}, {org?.state || 'N/A'}</div>
-                    <div><span className="text-gray-500">Pincode:</span> {org?.pincode || 'N/A'}</div>
-                    <div><span className="text-gray-500">Registered:</span> {org?.createdAt ? new Date(org.createdAt).toLocaleDateString() : 'N/A'}</div>
-                    <div><span className="text-gray-500">User ID:</span> <span className="font-mono text-xs">{getUserId() || 'N/A'}</span></div>
                   </div>
-                </div>
 
-                {/* Payment Status Card */}
-                <div className="bg-gradient-to-r from-blue-50/50 to-indigo-50/50 rounded-xl border border-blue-100 p-5">
-                  <h3 className="font-semibold text-lg mb-3 flex items-center gap-2">
-                    <div className="p-1.5 bg-blue-100 rounded-lg">
-                      <CreditCard className="h-4 w-4 text-blue-600" />
+                  <div className="flex flex-wrap items-center gap-x-7 gap-y-3 border-b border-emerald-100 bg-emerald-50/70 px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <CreditCard className="h-4 w-4 text-emerald-700" />
+                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Payment</span>
+                      <span className="text-sm font-bold text-slate-900">{paymentStatus === 1 ? "Paid" : paymentStatus === 0 ? "Pending" : "Not Started"}</span>
                     </div>
-                    Payment Status
-                  </h3>
-                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div className="hidden h-5 w-px bg-emerald-200 sm:block" />
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="h-4 w-4 text-emerald-700" />
+                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Registration</span>
+                      <span className="text-sm font-bold text-slate-900">{org?.status === 2 ? "Approved" : org?.status === 3 ? "Rejected" : "Pending"}</span>
+                    </div>
+                    <div className="hidden h-5 w-px bg-emerald-200 sm:block" />
+                    <div className="flex items-center gap-2">
+                      <Users className="h-4 w-4 text-emerald-700" />
+                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Team</span>
+                      <span className="text-sm font-bold text-slate-900">{members.length} member{members.length === 1 ? "" : "s"}</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2">
+                    {organizationDetailItems.map((item) => (
+                      <div key={item.label} className="grid grid-cols-[112px_minmax(0,1fr)] gap-3 border-b border-slate-100 py-3 md:odd:pr-6 md:even:pl-6">
+                        <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          <item.icon className="h-3.5 w-3.5 text-emerald-600" />
+                          {item.label}
+                        </p>
+                        <p className="break-words text-sm font-semibold text-slate-950">{String(item.value || "N/A")}</p>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="bg-white">
+                  <div className="flex flex-col gap-3 border-b border-emerald-100 pb-4 sm:flex-row sm:items-end sm:justify-between">
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">Current Status:</p>
-                      <PaymentStatusBadge paymentStatus={paymentStatus ?? 0} />
+                      <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Team Members</p>
+                      <h3 className="mt-1 text-xl font-bold text-slate-950">Employee Evidence</h3>
+                      <p className="mt-1 text-sm text-slate-500">Employee ID, department, evidence view and download.</p>
                     </div>
-                    {paymentStatus === 0 && (
-                      <div className="flex items-center gap-2 text-sm text-amber-700 bg-amber-50 px-3 py-2 rounded-lg">
-                        <AlertCircle className="h-4 w-4" />
-                        Payment pending. Cannot approve until payment is completed.
-                      </div>
-                    )}
-                    {paymentStatus === 1 && (
-                      <div className="flex items-center gap-2 text-sm text-emerald-700 bg-emerald-50 px-3 py-2 rounded-lg">
-                        <CheckCircle2 className="h-4 w-4" />
-                        Payment confirmed. Ready for approval.
-                      </div>
-                    )}
+                    <Badge className="w-fit rounded-full bg-emerald-600 px-3 py-1 text-white hover:bg-emerald-600">{members.length} members</Badge>
                   </div>
-                </div>
-
-                {/* Team Members Card */}
-                <div className="rounded-xl border p-5">
-                  <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
-                    <div className="p-1.5 bg-emerald-100 rounded-lg">
-                      <Users className="h-4 w-4 text-emerald-600" />
-                    </div>
-                    Team Members
-                    <Badge variant="secondary" className="ml-2">{members.length} members</Badge>
-                  </h3>
 
                   {loadingTeam ? (
-                    <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-gray-500" /></div>
+                    <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div>
                   ) : teamFetchError ? (
-                    <div className="text-center py-6"><p className="text-amber-600">{teamFetchError}</p><Button variant="ghost" size="sm" onClick={fetchTeamMembers} className="mt-2">Retry</Button></div>
+                    <div className="text-center py-8"><p className="text-amber-600">{teamFetchError}</p><Button variant="ghost" size="sm" onClick={fetchTeamMembers} className="mt-2">Retry</Button></div>
                   ) : members.length === 0 ? (
-                    <div className="text-center py-6"><p className="text-gray-500">No team members found</p></div>
+                    <div className="text-center py-8"><p className="text-gray-500">No team members found</p></div>
                   ) : (
-                    <div className="overflow-x-auto -mx-5 px-5">
-                      <table className="w-full text-sm">
-                        <thead className="bg-gray-50">
-                          <tr>
-                            <th className="p-3 text-left font-semibold text-gray-600 rounded-l-lg">#</th>
-                            <th className="p-3 text-left font-semibold text-gray-600">Full Name</th>
-                            <th className="p-3 text-left font-semibold text-gray-600 hidden sm:table-cell">Email</th>
-                            <th className="p-3 text-left font-semibold text-gray-600">Department</th>
-                            <th className="p-3 text-left font-semibold text-gray-600 rounded-r-lg">Role</th>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[920px] text-sm">
+                        <thead className="bg-emerald-600 text-white">
+                          <tr className="text-left text-xs font-bold uppercase tracking-wide">
+                            <th className="px-5 py-3">#</th>
+                            <th className="px-5 py-3">Member</th>
+                            <th className="px-5 py-3">Employee ID</th>
+                            <th className="px-5 py-3">Department</th>
+                            <th className="px-5 py-3">Evidence</th>
+                            <th className="px-5 py-3 text-right">Actions</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {members.map((member, index) => (
-                            <tr key={member.id || index} className="border-t hover:bg-gray-50 transition-colors">
-                              <td className="p-3">{index + 1}</td>
-                              <td className="p-3 font-medium">{member.name || 'N/A'}</td>
-                              <td className="p-3 text-gray-500 hidden sm:table-cell">{member.email || 'N/A'}</td>
-                              <td className="p-3">
-                                <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200">
-                                  {formatRole(member.role)}
-                                </Badge>
-                              </td>
-                              <td className="p-3 capitalize">{member.role || 'N/A'}</td>
-                            </tr>
-                          ))}
+                          {members.map((member, index) => {
+                            const documentPath = getTeamMemberDocumentPath(member);
+                            const documentUrl = documentPath ? getFileUrl(documentPath) : null;
+                            const evidenceFileName = getTeamMemberEvidenceFileName(member) || "Evidence PDF";
+
+                            return (
+                              <tr key={member.id || index} className="border-b border-slate-100 transition-colors last:border-b-0 even:bg-slate-50/70 hover:bg-emerald-50/70">
+                                <td className="px-5 py-4 font-semibold text-slate-500">{index + 1}</td>
+                                <td className="px-5 py-4">
+                                  <p className="font-bold text-slate-950">{member.name || "N/A"}</p>
+                                  <p className="mt-1 text-slate-500">{member.email || "N/A"}</p>
+                                </td>
+                                <td className="px-5 py-4">
+                                  <span className="font-mono text-sm font-bold text-slate-950">{getTeamMemberEmployeeId(member)}</span>
+                                </td>
+                                <td className="px-5 py-4">
+                                  <Badge variant="outline" className="rounded-full border-emerald-200 bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">
+                                    {formatRole(member.role)}
+                                  </Badge>
+                                </td>
+                                <td className="max-w-[300px] px-5 py-4">
+                                  {documentUrl ? (
+                                    <div className="flex min-w-0 items-center gap-2 text-slate-700">
+                                      <FileText className="h-4 w-4 shrink-0 text-slate-500" />
+                                      <span className="truncate font-medium" title={evidenceFileName}>{evidenceFileName}</span>
+                                    </div>
+                                  ) : (
+                                    <span className="text-sm text-gray-400">No evidence uploaded</span>
+                                  )}
+                                </td>
+                                <td className="px-5 py-4">
+                                  {documentUrl ? (
+                                    <div className="flex justify-end gap-2">
+                                      <a href={documentUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-emerald-700 shadow-sm hover:bg-emerald-50">
+                                        <Eye className="h-4 w-4" />
+                                        View
+                                      </a>
+                                      <a href={documentUrl} download={evidenceFileName} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50">
+                                        <Download className="h-4 w-4" />
+                                        Download
+                                      </a>
+                                    </div>
+                                  ) : (
+                                    <span className="block text-right text-sm text-gray-400">N/A</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
                   )}
-                </div>
+                </section>
 
-                {/* Documents Card */}
-                <div className="rounded-xl border p-5">
-                  <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
-                    <div className="p-1.5 bg-emerald-100 rounded-lg">
-                      <FileText className="h-4 w-4 text-emerald-600" />
-                    </div>
-                    Uploaded Documents
-                  </h3>
-                  
-                  {loadingDocs ? (
-                    <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-gray-500" /></div>
-                  ) : docsFetchError ? (
-                    <div className="text-center py-6"><p className="text-amber-600">{docsFetchError}</p><Button variant="ghost" size="sm" onClick={fetchDocuments} className="mt-2">Retry</Button></div>
-                  ) : !documents ? (
-                    <div className="text-center py-6"><p className="text-gray-500">No documents found</p></div>
-                  ) : (
-                    <div className="grid gap-3">
-                      {[
-                        { label: "🏢 Registration Certificate", desc: "Organization registration proof", path: documents.registrationCertPath },
-                        { label: "🆔 Team Lead ID Proof", desc: "Government issued ID", path: documents.teamLeadIdPath },
-                        { label: "📋 Nursing Council Registration", desc: "Professional registration", path: documents.nursingCouncilRegPath }
-                      ].map((doc, idx) => (
-                        <div key={idx} className="flex flex-wrap items-center justify-between p-4 bg-gray-50 rounded-xl hover:bg-gray-100 transition-all">
-                          <div>
-                            <p className="font-medium text-gray-800">{doc.label}</p>
-                            <p className="text-xs text-gray-500">{doc.desc}</p>
-                          </div>
-                          {doc.path ? (
-                            <a href={getFileUrl(doc.path)} target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-700 flex items-center gap-1 px-3 py-1.5 bg-white rounded-lg border shadow-sm hover:shadow transition-all">
-                              <Eye className="h-3.5 w-3.5" /> View
-                            </a>
-                          ) : (
-                            <span className="text-red-500 text-sm flex items-center gap-1"><XCircle className="h-3.5 w-3.5" /> Not uploaded</span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Status Info Card */}
-                <div className="bg-gray-50/80 rounded-xl p-5">
-                  <h3 className="font-semibold text-lg mb-3 flex items-center gap-2">
-                    <div className="p-1.5 bg-gray-200 rounded-lg">
-                      <AlertCircle className="h-4 w-4 text-gray-600" />
-                    </div>
+                <section className="border-t border-emerald-100 pt-4">
+                  <h3 className="mb-3 flex items-center gap-2 text-lg font-semibold text-slate-950">
+                    <AlertCircle className="h-4 w-4 text-emerald-600" />
                     Registration Status
                   </h3>
                   <div className="flex flex-wrap items-center justify-between gap-4">
@@ -761,7 +1315,7 @@ const RegistrationDetailsModal = ({ org, isOpen, onClose, onApprove, onReject, o
                       <p className="text-sm font-medium">{org?.createdAt ? new Date(org.createdAt).toLocaleString() : 'N/A'}</p>
                     </div>
                   </div>
-                </div>
+                </section>
               </>
             )}
           </div>
@@ -844,12 +1398,6 @@ const AdminDashboard = () => {
     return (nameParts[0].charAt(0) + nameParts[nameParts.length - 1].charAt(0)).toUpperCase();
   };
 
-  // Get first name for welcome message
-  const getFirstName = (fullName: string) => {
-    if (!fullName) return "Admin";
-    return fullName.split(" ")[0];
-  };
-
   // Handle logout
   const handleLogout = () => {
     clearAuthSession("manual");
@@ -893,10 +1441,24 @@ const AdminDashboard = () => {
   }, [navigate]);
 
   useEffect(() => {
-    setActiveTab(getAdminTabFromSearch(location.search));
-  }, [location.search]);
+    const nextTab = getAdminTabFromSearch(location.search);
+
+    if (!isAdminNavItemAllowedForRole(nextTab, userData.roleId)) {
+      setActiveTab("overview");
+      if (location.search) navigate("/admin", { replace: true });
+      return;
+    }
+
+    setActiveTab(nextTab);
+  }, [location.search, navigate, userData.roleId]);
 
   const handleAdminNavSelect = (tabId: string) => {
+    if (!isAdminNavItemAllowedForRole(tabId, userData.roleId)) {
+      setActiveTab("overview");
+      navigate("/admin", { replace: true });
+      return;
+    }
+
     setActiveTab(tabId);
     navigate(tabId === "overview" ? "/admin" : `/admin?tab=${tabId}`, { replace: true });
   };
@@ -1013,13 +1575,13 @@ const AdminDashboard = () => {
     if (statusFilter !== "all") filtered = filtered.filter(o => o.status === parseInt(statusFilter));
     if (searchTerm) filtered = filtered.filter(o =>
       o.organizationName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      o.registrationNumber?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      getHospitalRegisteredId(o).toLowerCase().includes(searchTerm.toLowerCase()) ||
       o.orgEmail?.toLowerCase().includes(searchTerm.toLowerCase())
     );
     return filtered;
   };
 
-  const adminNav = adminNavItems;
+  const adminNav = getAdminNavItemsForRole(userData.roleId);
 
   const filteredOrgs = getFilteredOrganizations();
 
@@ -1085,20 +1647,13 @@ const AdminDashboard = () => {
               </h1>
             </div>
             <div className="flex items-center gap-2 sm:gap-3">
-              <button className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors">
-                <Bell className="h-5 w-5 text-gray-600" />
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full"></span>
-              </button>
-              <div className="h-8 w-px bg-gray-200 hidden sm:block"></div>
-              <div className="flex items-center gap-2 sm:gap-3">
-                <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 flex items-center justify-center text-white text-sm font-bold shadow-md">
-                  {getUserInitials(userData.fullName)}
-                </div>
-                <div className="hidden sm:block">
-                  <p className="text-sm font-medium text-gray-700">{getFirstName(userData.fullName)}</p>
-                  <p className="text-xs text-gray-400">Administrator</p>
-                </div>
-              </div>
+              <AccountMenu
+                fullName={userData.fullName}
+                subtitle="Administrator"
+                initials={getUserInitials(userData.fullName)}
+                dashboardPath="/admin"
+                onLogout={() => setShowLogoutDialog(true)}
+              />
             </div>
           </header>
 
@@ -1210,7 +1765,7 @@ const AdminDashboard = () => {
                                     <td className="p-4">
                                       <div>
                                         <p className="text-sm font-medium text-gray-800">{org.organizationName}</p>
-                                        <p className="text-xs text-gray-400 mt-0.5">{org.registrationNumber}</p>
+                                        <p className="text-xs text-gray-400 mt-0.5">{getHospitalRegisteredId(org)}</p>
                                       </div>
                                     </td>
                                     <td className="p-4 text-sm text-gray-500 hidden md:table-cell">{org.orgEmail}</td>
@@ -1288,7 +1843,7 @@ const AdminDashboard = () => {
                         <table className="w-full">
                           <thead className="bg-gray-50/50">
                             <tr className="border-b border-gray-100">
-                              <th className="text-left p-4 text-xs font-semibold text-gray-500">Reg ID</th>
+                              <th className="text-left p-4 text-xs font-semibold text-gray-500">Hospital ID</th>
                               <th className="text-left p-4 text-xs font-semibold text-gray-500">Organization</th>
                               <th className="text-left p-4 text-xs font-semibold text-gray-500 hidden lg:table-cell">Email</th>
                               <th className="text-left p-4 text-xs font-semibold text-gray-500 hidden xl:table-cell">Location</th>
@@ -1301,7 +1856,7 @@ const AdminDashboard = () => {
                             {filteredOrgs.map((org, idx) => (
                               <motion.tr key={org.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: idx * 0.02 }} className="border-b border-gray-100 hover:bg-gray-50/50 transition-colors">
                                 <td className="p-4">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">{org.registrationNumber}</span>
+                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">{getHospitalRegisteredId(org)}</span>
                                 </td>
                                 <td className="p-4">
                                   <p className="text-sm font-medium text-gray-800">{org.organizationName}</p>

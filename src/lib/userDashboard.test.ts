@@ -34,7 +34,7 @@ describe("dashboard qualification", () => {
     expect(getDashboardScorePercentLabel(dashboard)).toBe("90%");
   });
 
-  it("promotes qualifying candidates and adds a qualification certificate with score", () => {
+  it("promotes qualifying candidates and adds a qualification certificate without score in the name", () => {
     const dashboard = mergeDashboardScoreSummary(completedDashboard, {
       score: 35,
       totalMarks: 39,
@@ -44,13 +44,12 @@ describe("dashboard qualification", () => {
       completed: true,
     });
 
-    const result = applyDashboardExamCompletionOverride(dashboard, 101);
-
+    const result = applyDashboardExamCompletionOverride(dashboard, 101);  
     expect(result.currentStage).toBe("State");
     expect(result.activeLevel).toBe(1);
     expect(result.certificates?.some((certificate) =>
       certificate.name?.includes("Qualification Certificate") &&
-      certificate.name.includes("90%") &&
+     !certificate.name.includes("90%") &&
       certificate.status === "Available",
     )).toBe(true);
   });

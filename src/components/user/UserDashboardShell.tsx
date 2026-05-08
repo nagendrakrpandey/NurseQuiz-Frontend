@@ -11,6 +11,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import AccountMenu from "@/components/AccountMenu";
 import { Button } from "@/components/ui/button";
 import { clearAuthSession } from "@/lib/session";
 import {
@@ -182,19 +183,13 @@ const UserDashboardShell = ({
                 )}
               </Link>
             </Button>
-            <div className="flex items-center gap-2">
-              <div className="w-9 h-9 rounded-full bg-primary flex items-center justify-center text-primary-foreground text-sm font-bold">
-                {getInitials(userData.fullName)}
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleLogout}
-                className="md:hidden text-red-600 hover:text-red-700 hover:bg-red-50"
-              >
-                <LogOut className="h-4 w-4" />
-              </Button>
-            </div>
+            <AccountMenu
+              fullName={userData.fullName}
+              subtitle={userData.email || "Organization User"}
+              initials={getInitials(userData.fullName)}
+              dashboardPath="/dashboard"
+              onLogout={handleLogout}
+            />
           </div>
         </header>
 

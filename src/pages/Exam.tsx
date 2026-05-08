@@ -13,7 +13,7 @@ import {Select,SelectContent,SelectItem,SelectTrigger,SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { BASE_URL1 } from "@/Service/api";
-import { clearAuthSession } from "@/lib/session";
+import { clearAuthSession, EXAM_INSTRUCTION_DONE_KEY, EXAM_PRECHECK_DONE_KEY } from "@/lib/session";
 import {
   PNG_MIME_TYPE,
   canvasToBlob,
@@ -23,10 +23,13 @@ import {
 import {
   applyDashboardExamCompletionOverride,
   fetchDashboardData,
+  fetchDashboardExamResult,
   getDashboardCandidateId,
   getDashboardUserId,
   getStoredDashboardUser,
   isDashboardQuizCompleted,
+  mergeDashboardExamResult,
+  normalizeExamStage,
   saveDashboardExamCompletionOverride,
 } from "@/lib/userDashboard";
 
@@ -1225,10 +1228,15 @@ useEffect(() => {
     const userId = getStoredUserId();
     if (userId) {
       try {
-        const dashboardData = applyDashboardExamCompletionOverride(
-          await fetchDashboardData(userId),
-          userId,
-        );
+        let dashboardData = await fetchDashboardData(userId);
+
+        try {
+          dashboardData = mergeDashboardExamResult(dashboardData, await fetchDashboardExamResult());
+        } catch (examResultError) {
+          console.warn("Unable to load exam result status before exam:", examResultError);
+        }
+
+        dashboardData = applyDashboardExamCompletionOverride(dashboardData, userId);
 
         if (!isActive) return;
 
@@ -1559,7 +1567,7 @@ useEffect(() => {
   }, []);
 
   const finishExamAndOpenDashboard = useCallback(async () => {
-    ["preExamDone", "batchCode", "batchId", "level", "enrollment_no", "enrollmentNo"].forEach((key) =>
+    [EXAM_PRECHECK_DONE_KEY, EXAM_INSTRUCTION_DONE_KEY, "batchCode", "batchId", "level", "enrollment_no", "enrollmentNo"].forEach((key) =>
       localStorage.removeItem(key),
     );
     sessionStorage.clear();
@@ -1961,6 +1969,13 @@ useEffect(() => {
         const submittedAt = new Date().toISOString();
         const totalTimeTaken = examDurationMinutes * 60 - timeRemainingRef.current;
         const isCompletedSubmit = isFinalSubmit || isAutoSubmit;
+        const finalScore = isCompletedSubmit
+          ? effectiveQuestions.reduce((total, question) => {
+              const marks = getCorrectnessState(question, getAnswerForSave(question)).marks;
+              return total + (typeof marks === "number" ? marks : 0);
+            }, 0)
+          : null;
+        const examStage = normalizeExamStage(batchDetails?.level || localStorage.getItem("level"));
         const payload = {
           candidateId: finalCandidateId,
           questionId: currentQ.questionId,
@@ -1984,28 +1999,28 @@ useEffect(() => {
 
         persistEvidenceSnapshot(effectiveQuestions, locationSnapshot, isFinalSubmit, isAutoSubmit);
 
-        console.log("🚀 Sending payload:", payload);
-        console.log("🔐 TOKEN:", authToken);
+        console.log(" Sending payload:", payload);
+        console.log("TOKEN:", authToken);
 
-        // ✅ FIXED: Proper headers format
+        // Submit the current response with the auth headers expected by the API.
         const response = await fetch(`${BASE_URL1}/responses/save`, {
           method: "POST",
           headers: buildAuthHeaders(authToken),
           body: JSON.stringify(payload),
         });
 
-        console.log("📡 Response status:", response.status);
-        console.log("📡 Response status text:", response.statusText);
+        console.log(" Response status:", response.status);
+        console.log(" Response status text:", response.statusText);
 
         // Parse response
         let responseData;
         const contentType = response.headers.get("content-type");
         if (contentType && contentType.includes("application/json")) {
           responseData = await response.json();
-          console.log("📡 Response data:", responseData);
+          console.log(" Response data:", responseData);
         } else {
           const textResponse = await response.text();
-          console.log("📡 Text response:", textResponse);
+          console.log(" Text response:", textResponse);
           responseData = { message: textResponse };
         }
 
@@ -2037,6 +2052,24 @@ useEffect(() => {
             completedAt: submittedAt,
             currentStage: batchDetails?.level || localStorage.getItem("level") || null,
           });
+
+          try {
+            const submitResponse = await fetch(`${BASE_URL1}/exam/submit`, {
+              method: "POST",
+              headers: buildAuthHeaders(authToken),
+              body: JSON.stringify({
+                stage: examStage,
+                score: finalScore ?? 0,
+              }),
+            });
+            const submitResult = await submitResponse.json().catch(() => null);
+
+            if (!submitResponse.ok || submitResult?.success === false) {
+              console.warn("Exam submit API returned an error:", submitResult || submitResponse.statusText);
+            }
+          } catch (submitError) {
+            console.warn("Exam submit API sync failed; dashboard will refresh from saved responses.", submitError);
+          }
 
           try {
             await fetch(`${BASE_URL1}/exam/complete`, {
@@ -2100,6 +2133,27 @@ useEffect(() => {
     mediaStreamRef.current = null;
     setCameraState("idle");
   }, []);
+
+  const logoutFromExamHistory = useCallback(() => {
+    examEndingRef.current = true;
+    clearAuthSession("manual");
+    void stopCameraAndRecording();
+    void exitFullscreen();
+    navigate("/login", { replace: true });
+  }, [exitFullscreen, navigate, stopCameraAndRecording]);
+
+  useEffect(() => {
+    if (location.pathname.toLowerCase() !== "/exam") return;
+
+    window.history.pushState({ examBackGuard: true }, "", window.location.href);
+
+    const handleExamBack = () => {
+      logoutFromExamHistory();
+    };
+
+    window.addEventListener("popstate", handleExamBack);
+    return () => window.removeEventListener("popstate", handleExamBack);
+  }, [location.pathname, logoutFromExamHistory]);
 
   const handleAutoSubmit = useCallback(async () => {
     if (examEndingRef.current) return;
@@ -2419,6 +2473,10 @@ useEffect(() => {
     await stopCameraAndRecording();
     setShowCancelTestDialog(false);
     await exitFullscreen();
+    localStorage.removeItem(EXAM_PRECHECK_DONE_KEY);
+    localStorage.removeItem(EXAM_INSTRUCTION_DONE_KEY);
+    sessionStorage.removeItem(EXAM_PRECHECK_DONE_KEY);
+    sessionStorage.removeItem(EXAM_INSTRUCTION_DONE_KEY);
     navigate("/");
   };
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   AlertCircle,
   Award,
@@ -38,16 +38,15 @@ import {
   getCertificateName,
   getCertificateStatusLabel,
   getDashboardCertificates,
-  getDashboardEligibility,
   getDashboardLevels,
   getDashboardNotifications,
-  getDashboardScorePercentLabel,
   getFirstName,
   getLevelDate,
   getNotificationDescription,
   getProgressPercentage,
   isDashboardQuizCompleted,
   isCertificateAvailable,
+  startDashboardExam,
   type DashboardResponse,
   type DashboardStat,
 } from "@/lib/userDashboard";
@@ -74,6 +73,41 @@ const getStatusColor = (value?: string) => {
   return "text-warning";
 };
 
+const isExamSubmittedStatus = (dashboardData: DashboardResponse | null | undefined) => {
+  const completedStatuses = new Set([
+    "SUBMITTED",
+    "COMPLETED",
+    "FINISHED",
+    "PASS",
+    "PASSED",
+    "FAIL",
+    "FAILED",
+    "SELECTED",
+    "NOTSELECTED",
+    "QUALIFIED",
+    "NOTQUALIFIED",
+  ]);
+  const statuses = [
+    dashboardData?.quizStatus,
+    dashboardData?.examStatus,
+    dashboardData?.status,
+    dashboardData?.resultStatus,
+    dashboardData?.passStatus,
+    dashboardData?.result,
+  ]
+    .filter(Boolean)
+    .map((status) =>
+      String(status)
+        .trim()
+        .replace(/[\s_-]+/g, "")
+        .toUpperCase(),
+    );
+
+  return isDashboardQuizCompleted(dashboardData) || statuses.some((status) => completedStatuses.has(status));
+};
+
+const isAlreadySubmittedMessage = (message: string) => /already.*submit|submitted|completed|finished/i.test(message);
+
 const getStatIcon = (label?: string, fallbackIndex = 0): LucideIcon => {
   const normalized = String(label || "").toLowerCase();
 
@@ -90,13 +124,28 @@ const getStats = (dashboardData: DashboardResponse | null): StatCard[] => {
   const apiStats = dashboardData?.stats;
 
   if (Array.isArray(apiStats) && apiStats.length > 0) {
-    return apiStats.map((stat: DashboardStat, index) => ({
+    const mappedStats = apiStats.map((stat: DashboardStat, index) => ({
       label: String(stat.label || `Stat ${index + 1}`),
       value: formatDashboardLabel(stat.value ?? "Not Available"),
       subtext: stat.subtext,
       icon: getStatIcon(stat.label, index),
       color: stat.color || getStatusColor(String(stat.value ?? "")),
     }));
+    const hasExamStatus = mappedStats.some((stat) => /quiz|exam|status/i.test(stat.label));
+
+    return hasExamStatus
+      ? mappedStats
+      : [
+          ...mappedStats,
+          {
+            label: "Exam Status",
+            value: formatDashboardLabel(
+              dashboardData?.examStatus || dashboardData?.quizStatus || dashboardData?.status || "Not Started",
+            ),
+            icon: Clock,
+            color: getStatusColor(dashboardData?.examStatus || dashboardData?.quizStatus || dashboardData?.status),
+          },
+        ];
   }
 
   return [
@@ -113,10 +162,12 @@ const getStats = (dashboardData: DashboardResponse | null): StatCard[] => {
       color: "text-primary",
     },
     {
-      label: "Quiz Status",
-      value: formatDashboardLabel(dashboardData?.quizStatus || "Not Available"),
+      label: "Exam Status",
+      value: formatDashboardLabel(
+        dashboardData?.examStatus || dashboardData?.quizStatus || dashboardData?.status || "Not Started",
+      ),
       icon: Clock,
-      color: getStatusColor(dashboardData?.quizStatus),
+      color: getStatusColor(dashboardData?.examStatus || dashboardData?.quizStatus || dashboardData?.status),
     },
   ];
 };
@@ -141,27 +192,94 @@ const getNotificationIconClass = (type?: string) => {
   return "text-info";
 };
 
+const readStoredLoginBatch = () => {
+  let storedUser: Record<string, unknown> = {};
+
+  try {
+    storedUser = JSON.parse(localStorage.getItem("userData") || "{}");
+  } catch {
+    storedUser = {};
+  }
+
+  return {
+    batchId: Number(localStorage.getItem("batchId") || storedUser.batchId || storedUser.batch_id || 0) || null,
+    batchCode: String(localStorage.getItem("batchCode") || storedUser.batchCode || storedUser.batch_code || "").trim(),
+    level: String(localStorage.getItem("level") || storedUser.level || "").trim(),
+  };
+};
+
 const DashboardPage = () => {
   useIdleLogout();
 
   const { dashboardData, userData, loading, error, refreshDashboard } = useDashboardData();
+  const navigate = useNavigate();
   const { downloadingCertificate, downloadCertificate } = useCertificateDownload();
-  const [resultDialogOpen, setResultDialogOpen] = useState(false);
-  const nextRoundEligibility = getDashboardEligibility(dashboardData);
-  const nextRoundMessage =
-    isDashboardQuizCompleted(dashboardData) && nextRoundEligibility !== null
-      ? nextRoundEligibility
-        ? "Congratulations, you are eligible for the next round."
-        : "Sorry, you are not eligible for the next round."
-      : "";
-  const currentStageLabel = formatDashboardLabel(dashboardData?.currentStage || "Not Available");
-  const scorePercentLabel = getDashboardScorePercentLabel(dashboardData);
+  const [examActionLoading, setExamActionLoading] = useState(false);
+  const [examActionMessage, setExamActionMessage] = useState("");
+  const [examCompletedDialogDismissed, setExamCompletedDialogDismissed] = useState(false);
+  const examCompleted = isExamSubmittedStatus(dashboardData);
+  const examStatusLabel = formatDashboardLabel(
+    dashboardData?.examStatus || dashboardData?.quizStatus || dashboardData?.status || "Not Started",
+  );
+
+  const closeExamActionDialog = () => {
+    setExamActionMessage("");
+    if (examCompleted) setExamCompletedDialogDismissed(true);
+  };
+
+  const handleStartExam = async () => {
+    if (examCompleted) {
+      setExamActionMessage("Your exam is completed.");
+      return;
+    }
+
+    setExamActionLoading(true);
+    setExamActionMessage("");
+
+    try {
+      const startResult = await startDashboardExam(dashboardData?.currentStage);
+      await refreshDashboard();
+      if (isAlreadySubmittedMessage(startResult.message)) {
+        setExamActionMessage("Your exam is completed.");
+        return;
+      }
+
+      const storedBatch = readStoredLoginBatch();
+      const resolvedBatchId = Number(startResult.batchId || storedBatch.batchId || 0) || null;
+      const resolvedBatchCode = String(startResult.batchCode || storedBatch.batchCode || "").trim();
+      const resolvedLevel = String(startResult.level || storedBatch.level || dashboardData?.currentStage || "").trim();
+
+      const precheckParams = new URLSearchParams();
+      if (resolvedBatchId) {
+        localStorage.setItem("batchId", String(resolvedBatchId));
+        precheckParams.set("batchId", String(resolvedBatchId));
+      }
+      if (resolvedBatchCode) {
+        localStorage.setItem("batchCode", resolvedBatchCode);
+        precheckParams.set("batchCode", resolvedBatchCode);
+      }
+      if (resolvedLevel) {
+        localStorage.setItem("level", resolvedLevel);
+        precheckParams.set("level", resolvedLevel);
+      }
+
+      const precheckSearch = precheckParams.toString();
+      navigate(`/Precheck${precheckSearch ? `?${precheckSearch}` : ""}`);
+    } catch (startError) {
+      const message = startError instanceof Error ? startError.message : "Unable to start exam.";
+      const alreadySubmitted = isAlreadySubmittedMessage(message);
+      setExamActionMessage(alreadySubmitted ? "Your exam is completed." : message);
+      await refreshDashboard();
+    } finally {
+      setExamActionLoading(false);
+    }
+  };
 
   useEffect(() => {
-    if (nextRoundMessage) {
-      setResultDialogOpen(true);
+    if (examCompleted && !examCompletedDialogDismissed && !examActionMessage) {
+      setExamActionMessage("Your exam is completed.");
     }
-  }, [nextRoundMessage]);
+  }, [examActionMessage, examCompleted, examCompletedDialogDismissed]);
 
   if (loading) {
     return (
@@ -189,80 +307,15 @@ const DashboardPage = () => {
       dashboardData={dashboardData}
       userData={userData}
     >
-      <Dialog open={Boolean(nextRoundMessage) && resultDialogOpen} onOpenChange={setResultDialogOpen}>
-        <DialogContent
-          className={`overflow-hidden p-0 sm:max-w-md ${
-            nextRoundEligibility ? "border-success/30" : "border-warning/30"
-          }`}
-        >
-          <div className={nextRoundEligibility ? "h-2 bg-success" : "h-2 bg-warning"} />
-          <div className="space-y-5 p-5 sm:p-6">
-            <div className="flex flex-col items-center text-center">
-              <div
-                className={`mb-4 flex h-16 w-16 items-center justify-center rounded-full ${
-                  nextRoundEligibility
-                    ? "bg-success/10 text-success"
-                    : "bg-warning/10 text-warning"
-                }`}
-              >
-                {nextRoundEligibility ? (
-                  <Trophy className="h-8 w-8" />
-                ) : (
-                  <XCircle className="h-8 w-8" />
-                )}
-              </div>
-              <DialogHeader className="items-center text-center sm:text-center">
-                <DialogTitle className="text-2xl font-bold">
-                  {nextRoundEligibility ? "Congratulations!" : "Result Update"}
-                </DialogTitle>
-                <DialogDescription className="max-w-sm text-center text-sm leading-6">
-                  {nextRoundEligibility
-                    ? `You have qualified for the ${currentStageLabel} level${
-                        scorePercentLabel ? ` with ${scorePercentLabel}.` : "."
-                      }`
-                    : "We regret to inform you that you are not eligible for the next round."}
-                </DialogDescription>
-              </DialogHeader>
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="rounded-lg bg-muted/60 p-3 text-center">
-                <p className="text-xs text-muted-foreground">Quiz Status</p>
-                <p className="mt-1 font-semibold text-card-foreground">Completed</p>
-              </div>
-              <div className="rounded-lg bg-muted/60 p-3 text-center">
-                <p className="text-xs text-muted-foreground">
-                  {nextRoundEligibility ? "Next Level" : "Current Level"}
-                </p>
-                <p className="mt-1 font-semibold text-card-foreground">{currentStageLabel}</p>
-              </div>
-              <div className="rounded-lg bg-muted/60 p-3 text-center">
-                <p className="text-xs text-muted-foreground">Score</p>
-                <p className="mt-1 font-semibold text-card-foreground">
-                  {scorePercentLabel || "Not Available"}
-                </p>
-              </div>
-            </div>
-
-            <p
-              className={`rounded-lg px-3 py-2 text-center text-sm font-medium ${
-                nextRoundEligibility
-                  ? "bg-success/10 text-success"
-                  : "bg-warning/10 text-warning"
-              }`}
-            >
-              {nextRoundMessage}
-            </p>
-
-            <DialogFooter className="gap-2 sm:justify-center sm:space-x-0">
-              <Button variant="outline" onClick={() => setResultDialogOpen(false)}>
-                Close
-              </Button>
-              <Button asChild>
-                <Link to="/competition">View Competition</Link>
-              </Button>
-            </DialogFooter>
-          </div>
+      <Dialog open={Boolean(examActionMessage)} onOpenChange={(open) => !open && closeExamActionDialog()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Exam Status</DialogTitle>
+            <DialogDescription>{examActionMessage}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={closeExamActionDialog}>OK</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -298,17 +351,30 @@ const DashboardPage = () => {
           </p>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             {quizAvailable ? (
-              <Button asChild variant="secondary" size="sm" className="w-full sm:w-auto">
-                <Link to="/Precheck">
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full sm:w-auto"
+                onClick={handleStartExam}
+                disabled={examActionLoading}
+              >
+                {examActionLoading ? (
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
                   <Play className="mr-2 h-4 w-4" />
-                  Start Exam
-                </Link>
+                )}
+                {examActionLoading ? "Starting..." : "Start Exam"}
               </Button>
             ) : (
               <Badge className="w-fit bg-primary-foreground/20 text-primary-foreground hover:bg-primary-foreground/20">
-                {formatDashboardLabel(dashboardData?.quizStatus || "Exam Not Available")}
+                {formatDashboardLabel(
+                  dashboardData?.examStatus || dashboardData?.quizStatus || dashboardData?.status || "Exam Not Available",
+                )}
               </Badge>
             )}
+            <Badge className="w-fit bg-primary-foreground/20 text-primary-foreground hover:bg-primary-foreground/20">
+              Exam Status: {examStatusLabel}
+            </Badge>
             {userData.email && (
               <span className="break-all text-xs text-primary-foreground/70 sm:self-center">
                 {userData.email}
@@ -375,11 +441,6 @@ const DashboardPage = () => {
                   })}
                 </div>
                 <Progress value={progressValue} className="h-2" />
-                {dashboardData?.nextExamDate && (
-                  <p className="mt-3 text-sm text-muted-foreground">
-                    Next Exam: {formatDashboardDate(dashboardData.nextExamDate)}
-                  </p>
-                )}
               </>
             ) : (
               <div className="rounded-lg bg-muted/50 p-6 text-center text-muted-foreground">

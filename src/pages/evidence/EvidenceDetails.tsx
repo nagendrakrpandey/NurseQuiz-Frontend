@@ -517,7 +517,7 @@ const EvidenceOnlyView = ({
                     <img
                       src={card.selfie.url}
                       alt={`${card.name} selfie`}
-                      className="aspect-[4/3] w-full rounded-lg object-cover"
+                      className="h-56 w-full rounded-lg bg-slate-50 object-contain shadow-sm sm:h-64"
                     />
                   ) : (
                     <div className="flex aspect-[4/3] items-center justify-center rounded-lg border border-dashed border-sky-200 bg-sky-50 text-center text-xs text-slate-500">
@@ -561,7 +561,7 @@ const EvidenceOnlyView = ({
                     <img
                       src={card.document.url}
                       alt={`${card.name} document`}
-                      className="aspect-[4/3] w-full rounded-lg object-cover"
+                      className="h-56 w-full rounded-lg bg-slate-50 object-contain shadow-sm sm:h-64"
                     />
                   ) : (
                     <div className="flex aspect-[4/3] items-center justify-center rounded-lg border border-dashed border-sky-200 bg-sky-50 text-center text-xs text-slate-500">
@@ -640,10 +640,10 @@ const EvidenceOnlyView = ({
                   <img
                     src={item.url}
                     alt={item.filename}
-                    className="aspect-[4/3] w-full rounded-lg object-cover"
+                    className="h-56 w-full rounded-lg bg-slate-50 object-contain shadow-sm sm:h-64"
                   />
                 ) : item.type === "video" && item.url ? (
-                  <video src={item.url} controls className="aspect-[4/3] w-full rounded-lg bg-black object-cover" />
+                  <video src={item.url} controls className="h-56 w-full rounded-lg bg-black object-contain sm:h-64" />
                 ) : (
                   <div
                     className="flex aspect-[4/3] items-center justify-center rounded-lg border border-dashed border-sky-200 bg-white"
@@ -729,7 +729,7 @@ const EvidenceOnlyView = ({
 
               <div className="p-3">
                 {item.url ? (
-                  <video src={item.url} controls className="aspect-[4/3] w-full rounded-lg bg-black object-cover" />
+                  <video src={item.url} controls className="h-56 w-full rounded-lg bg-black object-contain sm:h-64" />
                 ) : (
                   <div
                     className="flex aspect-[4/3] items-center justify-center rounded-lg border border-dashed border-sky-200 bg-white"

@@ -1,5 +1,7 @@
 export const SESSION_LAST_ACTIVITY_KEY = "sessionLastActivityAt";
 export const SESSION_LOGOUT_REASON_KEY = "sessionLogoutReason";
+export const EXAM_PRECHECK_DONE_KEY = "preExamDone";
+export const EXAM_INSTRUCTION_DONE_KEY = "instructionDone";
 export const IDLE_LOGOUT_MS = 30 * 60 * 1000;
 
 const AUTH_STORAGE_KEYS = [
@@ -16,7 +18,8 @@ const AUTH_STORAGE_KEYS = [
 ];
 
 const EXAM_SESSION_STORAGE_KEYS = [
-  "preExamDone",
+  EXAM_PRECHECK_DONE_KEY,
+  EXAM_INSTRUCTION_DONE_KEY,
   "batchCode",
   "batchId",
   "level",
@@ -88,6 +91,7 @@ export const getPostLoginRoute = (roleId, loginStatus) => {
 
   if (status === "1") {
     if (role === "1") return "/admin";
+    if (role === "2") return "/admin";
     if (role === "3") return "/dashboard";
   }
 

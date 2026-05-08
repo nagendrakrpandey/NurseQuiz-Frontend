@@ -1,7 +1,9 @@
 // App.tsx
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { useNavigate } from "react-router-dom";
 import { Camera, AlertCircle, CheckCircle, User, FileText, X, Loader } from 'lucide-react';
 import { BASE_URL, BASE_URL1 } from "@/Service/api";
+import { EXAM_INSTRUCTION_DONE_KEY } from "@/lib/session";
 import {
   PNG_MIME_TYPE,
   buildEvidenceJsonPayload,
@@ -198,6 +200,7 @@ const CustomDialog = ({ isOpen, onClose, title, message, type }: {
 };
 
 function App() {
+  const navigate = useNavigate();
   const [items, setItems] = useState<CaptureItem[]>([]);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(true);
@@ -852,11 +855,13 @@ const handleContinue = useCallback(async () => {
   if (!allItemsValid) return;
 
   showDialog('Success', 'All captures have been saved successfully!', 'success');
+  localStorage.removeItem(EXAM_INSTRUCTION_DONE_KEY);
+  sessionStorage.setItem(EXAM_INSTRUCTION_DONE_KEY, "true");
 
   setTimeout(() => {
-    window.location.href = `/Exam${window.location.search || ''}`;
+    navigate(`/Exam${window.location.search || ''}`, { replace: true });
   }, 1500);
-}, [allItemsValid]);
+}, [allItemsValid, navigate]);
 
   const renderCaptureCard = (item: CaptureItem) => {
     const isSelfie = item.type === 'selfie';
@@ -898,7 +903,7 @@ const handleContinue = useCallback(async () => {
                 <img 
                   src={item.imageData} 
                   alt={`${displayName} capture`}
-                  className="w-full h-40 object-cover rounded-lg shadow-md"
+                  className="h-56 w-full rounded-lg bg-gray-50 object-contain shadow-md sm:h-64"
                 />
                 <button
                   onClick={() => retryCapture(item.id)}

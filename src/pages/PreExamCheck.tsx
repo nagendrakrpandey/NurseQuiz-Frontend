@@ -1,21 +1,25 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Camera, Mic, MapPin, Wifi, Loader2, RefreshCw } from "lucide-react";
+import { AlertCircle, Camera, Mic, MapPin, Wifi, Loader2, RefreshCw } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import bg from "@/assets/bg1.png";
-import { clearAuthSession } from "@/lib/session";
-import {
-  applyDashboardExamCompletionOverride,
-  fetchDashboardData,
-  getDashboardUserId,
-  getStoredDashboardUser,
-  isDashboardQuizCompleted,
-} from "@/lib/userDashboard";
+import { BASE_URL1 } from "@/Service/api";
+import { clearAuthSession, EXAM_INSTRUCTION_DONE_KEY, EXAM_PRECHECK_DONE_KEY } from "@/lib/session";
+import {applyDashboardExamCompletionOverride, fetchDashboardData, fetchDashboardExamResult,
+  getDashboardUserId, getStoredDashboardUser, isDashboardQuizCompleted, mergeDashboardExamResult,} from "@/lib/userDashboard";
 
 const ALREADY_SUBMITTED_MESSAGE =
   "You have already submitted your exam. Your exam is already submitted.";
 
 type CheckStatus = "pending" | "success" | "failed" | "slow";
+
+type ExamWindowDialog = {
+  title: string;
+  message: string;
+};
+
+type BatchRecord = Record<string, unknown>;
+type CandidateRecord = Record<string, unknown>;
 
 const getErrorName = (error: unknown) => (error instanceof Error ? error.name : "");
 
@@ -25,6 +29,397 @@ const getGeolocationErrorCode = (error: unknown) => {
   const code = Number((error as { code?: unknown }).code);
   return Number.isFinite(code) ? code : null;
 };
+
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+const unwrapApiData = (payload: unknown) => {
+  const record = asRecord(payload);
+  return record.data ?? record.result ?? record.batch ?? payload;
+};
+
+const readStringField = (record: Record<string, unknown>, aliases: string[]) => {
+  for (const alias of aliases) {
+    const value = record[alias];
+    if (value !== null && value !== undefined && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+
+  return "";
+};
+
+const readNumberField = (record: Record<string, unknown>, aliases: string[]) => {
+  for (const alias of aliases) {
+    const value = record[alias];
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+
+  return null;
+};
+
+const readStoredUserRecord = () => {
+  try {
+    return asRecord(JSON.parse(localStorage.getItem("userData") || "{}"));
+  } catch {
+    return {};
+  }
+};
+
+const getExplicitBatchIdParam = () => {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("batchId")) return { present: false, value: null as number | null };
+
+  const rawValue = String(params.get("batchId") || "").trim();
+  const parsed = Number(rawValue);
+
+  return {
+    present: true,
+    value: Number.isFinite(parsed) && parsed > 0 ? parsed : null,
+  };
+};
+
+const getSelectedBatchId = () => {
+  const explicitBatchId = getExplicitBatchIdParam();
+  if (explicitBatchId.present) return explicitBatchId.value;
+
+  const params = new URLSearchParams(window.location.search);
+  const storedUser = readStoredUserRecord();
+  const storedCandidate = asRecord(storedUser.candidate);
+
+  return Number(
+    localStorage.getItem("batchId") ||
+      storedUser.batchId ||
+      storedUser.batch_id ||
+      storedCandidate.batchId ||
+      storedCandidate.batch_id ||
+      0,
+  ) || null;
+};
+
+const getStoredCandidateId = () => {
+  const storedUser = readStoredUserRecord();
+  const storedCandidate = asRecord(storedUser.candidate);
+
+  return Number(
+    localStorage.getItem("candidateId") ||
+      storedUser.candidateId ||
+      storedUser.candidate_id ||
+      storedUser.candidateID ||
+      storedCandidate.id ||
+      storedCandidate.candidateId ||
+      storedCandidate.candidate_id ||
+      0,
+  ) || null;
+};
+
+const getBatchIdFromRecord = (batch: BatchRecord) =>
+  readNumberField(batch, ["id", "batchId", "batch_id"]);
+
+const getBatchCodeFromRecord = (batch: BatchRecord) =>
+  readStringField(batch, ["batchCode", "batch_code", "code"]);
+
+const getCandidateIdFromRecord = (candidate: CandidateRecord) =>
+  readNumberField(candidate, ["id", "candidateId", "candidate_id", "candidateID"]);
+
+const normalizeForMatch = (value: unknown) =>
+  String(value || "").trim().toLowerCase();
+
+const getAuthHeaders = () => {
+  const token = String(localStorage.getItem("token") || localStorage.getItem("authToken") || "")
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+  const headers: HeadersInit = { Accept: "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+};
+
+const parseJsonResponse = async (response: Response) => {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { success: false, message: text };
+  }
+};
+
+const getLatestRecordTime = (batch: BatchRecord, candidate?: CandidateRecord) => {
+  const values = [
+    batch.start_date,
+    batch.startDate,
+    batch.end_date,
+    batch.endDate,
+    batch.created_at,
+    batch.createdAt,
+    batch.updated_at,
+    batch.updatedAt,
+    candidate?.joined_at,
+    candidate?.joinedAt,
+    candidate?.enrolled_at,
+    candidate?.enrolledAt,
+    candidate?.created_at,
+    candidate?.createdAt,
+  ];
+
+  return Math.max(
+    0,
+    ...values.map((value) => {
+      const timestamp = new Date(String(value || "")).getTime();
+      return Number.isFinite(timestamp) ? timestamp : 0;
+    }),
+  );
+};
+
+const fetchBatchById = async (batchId: number) => {
+  const response = await fetch(`${BASE_URL1}/batches/${encodeURIComponent(String(batchId))}`, {
+    method: "GET",
+    headers: getAuthHeaders(),
+  });
+  const payload = await parseJsonResponse(response);
+  const batchData = unwrapApiData(payload);
+  const batch = asRecord(Array.isArray(batchData) ? batchData[0] : batchData);
+
+  if (!response.ok || !Object.keys(batch).length || asRecord(payload).success === false) {
+    return {
+      batch: null,
+      message: String(asRecord(payload).message || "Unable to load batch details."),
+    };
+  }
+
+  return { batch, message: "" };
+};
+
+const resolveBatchFromEnrollment = async () => {
+  const params = new URLSearchParams(window.location.search);
+  const storedUser = readStoredUserRecord();
+  const storedCandidate = asRecord(storedUser.candidate);
+  const preferredBatchCode = normalizeForMatch(
+    params.get("batchCode") ||
+      localStorage.getItem("batchCode") ||
+      storedUser.batchCode ||
+      storedUser.batch_code ||
+      storedCandidate.batchCode ||
+      storedCandidate.batch_code,
+  );
+  const email = normalizeForMatch(localStorage.getItem("email") || storedUser.email || storedCandidate.email);
+  const enrollmentNo = normalizeForMatch(
+    localStorage.getItem("enrollment_no") ||
+      localStorage.getItem("enrollmentNo") ||
+      storedUser.enrollment_no ||
+      storedUser.enrollmentNo ||
+      storedUser.enrollmentNumber ||
+      storedCandidate.enrollment_no ||
+      storedCandidate.enrollmentNo,
+  );
+  const storedCandidateId = getStoredCandidateId();
+
+  const levelHint = normalizeForMatch(
+    params.get("level") ||
+      localStorage.getItem("level") ||
+      storedUser.level ||
+      storedCandidate.level ||
+      storedUser.currentStage,
+  ) || "district";
+  const levels = Array.from(new Set([levelHint, "district", "state", "national"]));
+
+  const matches: Array<{
+    batch: BatchRecord;
+    candidate?: CandidateRecord;
+    candidateMatched: boolean;
+    preferredCodeMatched: boolean;
+  }> = [];
+
+  for (const level of levels) {
+    try {
+      const batchResponse = await fetch(`${BASE_URL1}/batches?level=${encodeURIComponent(level)}`, {
+        method: "GET",
+        headers: getAuthHeaders(),
+      });
+      const batchPayload = await parseJsonResponse(batchResponse);
+      const batchData = unwrapApiData(batchPayload);
+      const batches: BatchRecord[] =
+        batchResponse.ok && asRecord(batchPayload).success !== false && Array.isArray(batchData)
+          ? batchData.map((item) => asRecord(item))
+          : [];
+
+      for (const batch of batches) {
+        const batchId = getBatchIdFromRecord(batch);
+        if (!batchId) continue;
+
+        const batchCode = normalizeForMatch(getBatchCodeFromRecord(batch));
+        const preferredCodeMatched = Boolean(preferredBatchCode && batchCode === preferredBatchCode);
+
+        if (preferredCodeMatched) {
+          matches.push({ batch, candidateMatched: false, preferredCodeMatched });
+        }
+
+        if (!email && !enrollmentNo && !storedCandidateId) continue;
+
+        try {
+          const candidateResponse = await fetch(`${BASE_URL1}/candidates?batchId=${encodeURIComponent(batchId)}`, {
+            method: "GET",
+            headers: getAuthHeaders(),
+          });
+          const candidatePayload = await parseJsonResponse(candidateResponse);
+          const candidateData = unwrapApiData(candidatePayload);
+          const candidates: CandidateRecord[] =
+            candidateResponse.ok && asRecord(candidatePayload).success !== false && Array.isArray(candidateData)
+              ? candidateData.map((item) => asRecord(item))
+              : [];
+
+          candidates
+            .filter((candidate) => {
+              const candidateId = getCandidateIdFromRecord(candidate);
+              const candidateEmail = normalizeForMatch(candidate.email);
+              const candidateEnrollment = normalizeForMatch(candidate.enrollment_no || candidate.enrollmentNo);
+
+              return (
+                Boolean(storedCandidateId && candidateId === storedCandidateId) ||
+                Boolean(email && candidateEmail === email) ||
+                Boolean(enrollmentNo && candidateEnrollment === enrollmentNo)
+              );
+            })
+            .forEach((candidate) => {
+              matches.push({
+                batch,
+                candidate,
+                candidateMatched: true,
+                preferredCodeMatched,
+              });
+            });
+        } catch (error) {
+          console.warn(`Unable to load candidates for batch ${batchId}:`, error);
+        }
+      }
+    } catch (error) {
+      console.warn(`Unable to search batches for ${level}:`, error);
+    }
+  }
+
+  if (!matches.length) return null;
+
+  const bestMatch = [...matches].sort((a, b) => {
+    const getRank = (match: typeof matches[number]) => {
+      const status = normalizeForMatch(match.batch.status);
+      return (
+        (match.preferredCodeMatched ? 1_000_000_000 : 0) +
+        (match.candidateMatched ? 500_000_000 : 0) +
+        (status.includes("active") || status.includes("live") ? 10_000_000 : 0) +
+        (status.includes("upcoming") ? 5_000_000 : 0) +
+        (status.includes("completed") ? -5_000_000 : 0) +
+        Math.floor(getLatestRecordTime(match.batch, match.candidate) / 100_000) +
+        (getBatchIdFromRecord(match.batch) || 0)
+      );
+    };
+
+    return getRank(b) - getRank(a);
+  })[0];
+
+  const nextBatchId = getBatchIdFromRecord(bestMatch.batch);
+  const nextBatchCode = getBatchCodeFromRecord(bestMatch.batch);
+  const nextLevel = readStringField(bestMatch.batch, ["level"]);
+
+  if (nextBatchId) localStorage.setItem("batchId", String(nextBatchId));
+  if (nextBatchCode) localStorage.setItem("batchCode", nextBatchCode);
+  if (nextLevel) localStorage.setItem("level", nextLevel);
+
+  return bestMatch.batch;
+};
+
+const padDatePart = (value: number) => String(value).padStart(2, "0");
+
+const formatLocalDatePart = (date: Date) =>
+  `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
+
+const normalizeTimePart = (value: string) => {
+  const rawValue = value.trim();
+  if (!rawValue) return "";
+
+  if (rawValue.includes("T")) {
+    const parsed = new Date(rawValue);
+    return Number.isFinite(parsed.getTime())
+      ? `${padDatePart(parsed.getHours())}:${padDatePart(parsed.getMinutes())}:${padDatePart(parsed.getSeconds())}`
+      : "";
+  }
+
+  const meridiemMatch = rawValue.match(/^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(am|pm)$/i);
+  if (meridiemMatch) {
+    let hours = Number(meridiemMatch[1]);
+    const minutes = Number(meridiemMatch[2] || 0);
+    const seconds = Number(meridiemMatch[3] || 0);
+    const meridiem = meridiemMatch[4].toLowerCase();
+
+    if (meridiem === "pm" && hours < 12) hours += 12;
+    if (meridiem === "am" && hours === 12) hours = 0;
+
+    return `${padDatePart(hours)}:${padDatePart(minutes)}:${padDatePart(seconds)}`;
+  }
+
+  const timeMatch = rawValue.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (timeMatch) {
+    return `${padDatePart(Number(timeMatch[1]))}:${padDatePart(Number(timeMatch[2]))}:${padDatePart(Number(timeMatch[3] || 0))}`;
+  }
+
+  return "";
+};
+
+const normalizeDatePart = (value: string) => {
+  const rawValue = value.trim();
+  if (!rawValue) return "";
+
+  const isoDateMatch = rawValue.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoDateMatch) return isoDateMatch[1];
+
+  const parsed = new Date(rawValue);
+  return Number.isFinite(parsed.getTime()) ? formatLocalDatePart(parsed) : "";
+};
+
+const parseBatchDateTime = (batch: BatchRecord, dateAliases: string[], timeAliases: string[]) => {
+  const dateValue = readStringField(batch, dateAliases);
+  const timeValue = readStringField(batch, timeAliases);
+
+  if (dateValue && timeValue) {
+    const datePart = normalizeDatePart(dateValue);
+    const timePart = normalizeTimePart(timeValue);
+    if (datePart && timePart) {
+      const parsed = new Date(`${datePart}T${timePart}`);
+      if (Number.isFinite(parsed.getTime())) return parsed;
+    }
+  }
+
+  if (dateValue) {
+    const parsed = new Date(dateValue);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+
+  if (timeValue && timeValue.includes("T")) {
+    const parsed = new Date(timeValue);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+
+  return null;
+};
+
+const formatExamDateTime = (date: Date) =>
+  date.toLocaleString(undefined, {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+const formatExamStartMessage = (message: string, startDateTime: Date) =>
+  `${message}\n\nStart: ${formatExamDateTime(startDateTime)}`;
+
+const formatExamEndMessage = (message: string, endDateTime: Date) =>
+  `${message}\n\nEnd: ${formatExamDateTime(endDateTime)}`;
+
+const startOfLocalDay = (date: Date) =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 
 const textDictionary = {
   title: "Pre-Exam Environment Check",
@@ -56,6 +451,7 @@ const textDictionary = {
 
   continueButton: "Continue to Exam",
   continueToInstructions: "Continue to Instructions",
+  checkingExamTime: "Checking exam time...",
 
   examSubmitted: "Exam Already Submitted",
   sessionExpired: "Session expired. Please login again.",
@@ -72,7 +468,18 @@ const textDictionary = {
 
   permissionDenied: "Permission denied. Please allow access and try again.",
   retryMessage: "Click retry to request permission again",
-  refreshPage: "Refresh Page"
+  refreshPage: "Refresh Page",
+  examNotStarted: "Exam Not Started",
+  examTimePassed: "Exam Time Passed",
+  examScheduleError: "Exam Schedule Error",
+  tooEarlyMessage: "You are too early. Your exam starts from",
+  timePassedMessage: "You are late. Your exam time is passed.",
+  datePassedMessage: "You are late. Your exam date is passed.",
+  batchMissing: "Batch details not found. Please start the exam from your dashboard.",
+  invalidBatchLink: "Invalid batch link. Please start the exam from your dashboard.",
+  goToDashboard: "Go to Dashboard",
+  scheduleMissing: "Exam start date/time or end date/time is not configured for this batch.",
+  scheduleVerifyFailed: "Unable to verify exam schedule. Please try again."
 };
 
 export default function PreExamCheck() {
@@ -86,6 +493,8 @@ export default function PreExamCheck() {
   const [checkingItem, setCheckingItem] = useState<string | null>(null);
   const [initialCheckDone, setInitialCheckDone] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [examWindowDialog, setExamWindowDialog] = useState<ExamWindowDialog | null>(null);
+  const [validatingExamWindow, setValidatingExamWindow] = useState(false);
 
   const [started, setStarted] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
@@ -119,6 +528,8 @@ export default function PreExamCheck() {
 
   // Get current language texts
   const t = textDictionary;
+  const explicitBatchId = getExplicitBatchIdParam();
+  const hasInvalidBatchLink = explicitBatchId.present && !explicitBatchId.value;
 
   const textMap = {
     pending: t.check,
@@ -126,6 +537,99 @@ export default function PreExamCheck() {
     failed: t.failed,
     slow: t.slow,
   };
+
+  const showExamWindowDialog = (title: string, message: string) => {
+    setExamWindowDialog({ title, message });
+  };
+
+  const validateBatchExamWindow = useCallback(async () => {
+    const explicitBatchId = getExplicitBatchIdParam();
+    if (explicitBatchId.present && !explicitBatchId.value) {
+      return {
+        allowed: false,
+        title: t.examScheduleError,
+        message: t.invalidBatchLink,
+      };
+    }
+
+    const batchId = getSelectedBatchId();
+
+    try {
+      const resolvedBatch = batchId
+        ? await fetchBatchById(batchId)
+        : { batch: await resolveBatchFromEnrollment(), message: "" };
+      const batch = resolvedBatch.batch;
+
+      if (!batch) {
+        return {
+          allowed: false,
+          title: t.examScheduleError,
+          message: resolvedBatch.message || t.batchMissing,
+        };
+      }
+
+      const resolvedBatchId = readNumberField(batch, ["id", "batchId", "batch_id"]);
+      if (resolvedBatchId) localStorage.setItem("batchId", String(resolvedBatchId));
+
+      const batchCode = readStringField(batch, ["batchCode", "batch_code", "code"]);
+      if (batchCode) localStorage.setItem("batchCode", batchCode);
+
+      const level = readStringField(batch, ["level"]);
+      if (level) localStorage.setItem("level", level);
+
+      const startDateTime = parseBatchDateTime(
+        batch,
+        ["startDate", "start_date", "examStartDate", "exam_start_date"],
+        ["startTime", "start_time", "examStartTime", "exam_start_time"],
+      );
+      const endDateTime = parseBatchDateTime(
+        batch,
+        ["endDate", "end_date", "examEndDate", "exam_end_date"],
+        ["endTime", "end_time", "examEndTime", "exam_end_time"],
+      );
+
+      if (!startDateTime || !endDateTime) {
+        return {
+          allowed: false,
+          title: t.examScheduleError,
+          message: t.scheduleMissing,
+        };
+      }
+
+      const now = new Date();
+      if (now.getTime() < startDateTime.getTime()) {
+        return {
+          allowed: false,
+          title: t.examNotStarted,
+          message: formatExamStartMessage(
+            `${t.tooEarlyMessage} ${formatExamDateTime(startDateTime)}.`,
+            startDateTime,
+          ),
+        };
+      }
+
+      if (now.getTime() > endDateTime.getTime()) {
+        const lateMessage = startOfLocalDay(now) > startOfLocalDay(endDateTime)
+          ? t.datePassedMessage
+          : t.timePassedMessage;
+
+        return {
+          allowed: false,
+          title: t.examTimePassed,
+          message: formatExamEndMessage(lateMessage, endDateTime),
+        };
+      }
+
+      return { allowed: true, title: "", message: "" };
+    } catch (error) {
+      console.error("Batch schedule verification failed:", error);
+      return {
+        allowed: false,
+        title: t.examScheduleError,
+        message: t.scheduleVerifyFailed,
+      };
+    }
+  }, [t.batchMissing, t.datePassedMessage, t.examNotStarted, t.examScheduleError, t.examTimePassed, t.scheduleMissing, t.scheduleVerifyFailed, t.timePassedMessage, t.tooEarlyMessage]);
 
   /* ================= COUNTDOWN REDIRECT ================= */
   useEffect(() => {
@@ -137,10 +641,15 @@ export default function PreExamCheck() {
       if (!userId) return;
 
       try {
-        const dashboardData = applyDashboardExamCompletionOverride(
-          await fetchDashboardData(userId),
-          userId,
-        );
+        let dashboardData = await fetchDashboardData(userId);
+
+        try {
+          dashboardData = mergeDashboardExamResult(dashboardData, await fetchDashboardExamResult());
+        } catch (examResultError) {
+          console.warn("Unable to load exam result status before pre-check:", examResultError);
+        }
+
+        dashboardData = applyDashboardExamCompletionOverride(dashboardData, userId);
 
         if (!isActive || !isDashboardQuizCompleted(dashboardData)) return;
 
@@ -408,10 +917,10 @@ export default function PreExamCheck() {
 }, []);
 
 useEffect(() => {
-  if (!isMobile && !started) {
+  if (!isMobile && !started && !hasInvalidBatchLink) {
     handleStart(); // auto run on laptop
   }
-}, [isMobile]);
+}, [hasInvalidBatchLink, isMobile]);
 
   const handleSingleCheck = async (type: string) => {
     if (isChecking) return;
@@ -445,6 +954,25 @@ useEffect(() => {
 
   const handleRefreshPage = () => {
     window.location.reload();
+  };
+
+  const handleContinueToExam = async () => {
+    if (!allPassed || isChecking || validatingExamWindow) return;
+
+    setValidatingExamWindow(true);
+    const examWindow = await validateBatchExamWindow();
+    setValidatingExamWindow(false);
+
+    if (!examWindow.allowed) {
+      showExamWindowDialog(examWindow.title, examWindow.message);
+      return;
+    }
+
+    localStorage.removeItem(EXAM_PRECHECK_DONE_KEY);
+    localStorage.removeItem(EXAM_INSTRUCTION_DONE_KEY);
+    sessionStorage.setItem(EXAM_PRECHECK_DONE_KEY, "true");
+    sessionStorage.removeItem(EXAM_INSTRUCTION_DONE_KEY);
+    navigate(`/instruction${window.location.search || ""}`);
   };
 
   const allPassed = 
@@ -504,10 +1032,66 @@ useEffect(() => {
     );
   }
 
+  if (hasInvalidBatchLink) {
+    return (
+      <div className="w-full min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
+        <div className="absolute inset-0 z-0">
+          <img
+            src={bg}
+            alt="background"
+            className="w-full h-full object-cover"
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
+          />
+          <div className="absolute inset-0 bg-black/20 backdrop-blur-[1px]"></div>
+        </div>
+
+        <div className="relative z-10 w-full max-w-md rounded-2xl border border-orange-200 bg-white/95 p-6 text-center shadow-2xl backdrop-blur-md sm:p-8">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-orange-100 text-orange-700">
+            <AlertCircle className="h-6 w-6" />
+          </div>
+          <h2 className="text-xl font-bold text-gray-900">{t.examScheduleError}</h2>
+          <p className="mt-3 text-sm leading-6 text-gray-600">{t.invalidBatchLink}</p>
+          <Button
+            className="mt-6 w-full bg-orange-600 text-white hover:bg-orange-700"
+            onClick={() => navigate("/dashboard", { replace: true })}
+          >
+            {t.goToDashboard}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   /*================= NORMAL PRE-EXAM UI ================= */
   return (
   <>
-{!started && isMobile && (
+{examWindowDialog && (
+  <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+    <div className="w-full max-w-md overflow-hidden rounded-2xl border border-orange-200 bg-white shadow-2xl">
+      <div className="border-b border-orange-100 bg-orange-50 px-5 py-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-orange-100 text-orange-700">
+            <AlertCircle className="h-5 w-5" />
+          </div>
+          <h2 className="text-lg font-bold text-gray-900">{examWindowDialog.title}</h2>
+        </div>
+      </div>
+      <div className="space-y-5 px-5 py-5">
+        <p className="whitespace-pre-line text-sm leading-6 text-gray-700">{examWindowDialog.message}</p>
+        <Button
+          className="w-full bg-orange-600 text-white hover:bg-orange-700"
+          onClick={() => setExamWindowDialog(null)}
+        >
+          {t.okButton}
+        </Button>
+      </div>
+    </div>
+  </div>
+)}
+
+{!started && isMobile && !hasInvalidBatchLink && (
   <div
     onClick={handleStart}
     className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
@@ -642,18 +1226,20 @@ useEffect(() => {
         {/* Continue Button */}
         <div className="pt-2 sm:pt-4 text-center">
           <Button
-            disabled={!allPassed || isChecking}
+            disabled={!allPassed || isChecking || validatingExamWindow}
             className={`w-full sm:w-auto min-w-[200px] h-11 sm:h-11 text-base sm:text-lg font-medium transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98] ${
-              allPassed && !isChecking
+              allPassed && !isChecking && !validatingExamWindow
                 ? "bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white shadow-lg hover:shadow-xl"
                 : "bg-gray-300 cursor-not-allowed text-gray-500"
             }`}
-            onClick={() => {
-              localStorage.setItem("preExamDone", "true");
-              navigate(`/instruction${window.location.search || ""}`);
-            }}
+            onClick={handleContinueToExam}
           >
-            {isChecking ? (
+            {validatingExamWindow ? (
+              <span className="flex items-center justify-center gap-2">
+                <Loader2 className="w-4 h-5 animate-spin" />
+                {t.checkingExamTime}
+              </span>
+            ) : isChecking ? (
               <span className="flex items-center justify-center gap-2">
                 <Loader2 className="w-4 h-5 animate-spin" />
                 {t.checking}

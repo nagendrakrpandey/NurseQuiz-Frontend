@@ -30,6 +30,25 @@ const StorageManager = {
     localStorage.setItem("roleId", userData.roleId);
     localStorage.setItem("loginStatus", userData.loginStatus);
     localStorage.setItem("contact", userData.contact);
+
+    if (userData.batchId) {
+      localStorage.setItem("batchId", String(userData.batchId));
+    } else {
+      localStorage.removeItem("batchId");
+    }
+
+    if (userData.batchCode) {
+      localStorage.setItem("batchCode", String(userData.batchCode));
+    } else {
+      localStorage.removeItem("batchCode");
+    }
+
+    if (userData.level) {
+      localStorage.setItem("level", String(userData.level));
+    } else {
+      localStorage.removeItem("level");
+    }
+
     localStorage.setItem("userData", JSON.stringify(userData));
     markSessionActivity();
     
@@ -39,7 +58,10 @@ const StorageManager = {
       candidateId: userData.candidateId,
       userName: userData.fullName,
       roleId: userData.roleId,
-      loginStatus: userData.loginStatus
+      loginStatus: userData.loginStatus,
+      batchId: userData.batchId,
+      batchCode: userData.batchCode,
+      level: userData.level
     });
   },
   
@@ -132,7 +154,10 @@ const LoginPage = () => {
           email: result.email,
           contact: result.contact,
           loginStatus: result.loginStatus,
-          roleId: result.roleId
+          roleId: result.roleId,
+          batchId: Number(result.batchId || result.batch_id) || null,
+          batchCode: result.batchCode || result.batch_code || "",
+          level: result.level || ""
         };
         
         StorageManager.saveUserData(userData);
@@ -152,7 +177,7 @@ const LoginPage = () => {
   };
 
   const handleForgotPassword = () => {
-    window.location.href = "/forgot-password";
+    navigate("/forgot-password", { state: { email } });
   };
 
   return (

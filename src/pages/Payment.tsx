@@ -29,8 +29,16 @@ interface PaymentData {
   amount: number;
   status: string;
   organizationId: string;
-  createdAt: string;
-  updatedAt: string;
+  createdAt?: string;
+  updatedAt?: string;
+  created_at?: string;
+  updated_at?: string;
+  date?: string;
+  time?: string;
+  paymentDate?: string;
+  paymentTime?: string;
+  transactionDate?: string;
+  transactionTime?: string;
   organizationName?: string;
   userEmail?: string;
   userName?: string;
@@ -53,7 +61,141 @@ interface MonthlyData {
   month: string;
   revenue: number;
   transactions: number;
+  sortKey: number;
 }
+
+const MONTH_LOOKUP: Record<string, number> = {
+  jan: 0,
+  january: 0,
+  feb: 1,
+  february: 1,
+  mar: 2,
+  march: 2,
+  apr: 3,
+  april: 3,
+  may: 4,
+  jun: 5,
+  june: 5,
+  jul: 6,
+  july: 6,
+  aug: 7,
+  august: 7,
+  sep: 8,
+  sept: 8,
+  september: 8,
+  oct: 9,
+  october: 9,
+  nov: 10,
+  november: 10,
+  dec: 11,
+  december: 11,
+};
+
+const toFullYear = (year: number) => (year < 100 ? 2000 + year : year);
+
+const parseTimeParts = (value?: string) => {
+  if (!value) return { hour: 0, minute: 0, second: 0 };
+
+  const match = value.trim().match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!match) return { hour: 0, minute: 0, second: 0 };
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2] || 0);
+  const second = Number(match[3] || 0);
+  const meridiem = match[4]?.toLowerCase();
+
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+
+  return { hour, minute, second };
+};
+
+const parseDateParts = (value?: string) => {
+  if (!value) return null;
+  const text = value.trim();
+
+  const isoMatch = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    return {
+      year: Number(isoMatch[1]),
+      month: Number(isoMatch[2]) - 1,
+      day: Number(isoMatch[3]),
+    };
+  }
+
+  const dmyMatch = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+  if (dmyMatch) {
+    return {
+      year: toFullYear(Number(dmyMatch[3])),
+      month: Number(dmyMatch[2]) - 1,
+      day: Number(dmyMatch[1]),
+    };
+  }
+
+  const namedMonthMatch = text.match(/^(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{2,4})/);
+  if (namedMonthMatch) {
+    const month = MONTH_LOOKUP[namedMonthMatch[2].toLowerCase()];
+    if (month === undefined) return null;
+
+    return {
+      year: toFullYear(Number(namedMonthMatch[3])),
+      month,
+      day: Number(namedMonthMatch[1]),
+    };
+  }
+
+  return null;
+};
+
+const getPaymentDateValue = (payment: PaymentData) =>
+  payment.createdAt ||
+  payment.created_at ||
+  payment.paymentDate ||
+  payment.transactionDate ||
+  payment.date ||
+  payment.updatedAt ||
+  payment.updated_at ||
+  "";
+
+const getPaymentTimeValue = (payment: PaymentData) =>
+  payment.paymentTime ||
+  payment.transactionTime ||
+  payment.time ||
+  "";
+
+const parsePaymentTimestamp = (payment: PaymentData) => {
+  const dateValue = getPaymentDateValue(payment);
+  const timeValue = getPaymentTimeValue(payment);
+  const shouldPreferLocalParser = /^\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}/.test(dateValue.trim());
+  const dateParts = parseDateParts(dateValue);
+
+  if (shouldPreferLocalParser && dateParts) {
+    const { hour, minute, second } = parseTimeParts(timeValue || dateValue);
+    return new Date(dateParts.year, dateParts.month, dateParts.day, hour, minute, second).getTime();
+  }
+
+  const nativeTimestamp = Date.parse(`${dateValue} ${timeValue}`.trim());
+  if (Number.isFinite(nativeTimestamp)) return nativeTimestamp;
+
+  if (dateParts) {
+    const { hour, minute, second } = parseTimeParts(timeValue || dateValue);
+    return new Date(dateParts.year, dateParts.month, dateParts.day, hour, minute, second).getTime();
+  }
+
+  return 0;
+};
+
+const getPaymentDate = (payment: PaymentData) => {
+  const timestamp = parsePaymentTimestamp(payment);
+  return timestamp ? new Date(timestamp) : null;
+};
+
+const sortPaymentsNewestFirst = (paymentsData: PaymentData[]) =>
+  [...paymentsData].sort((a, b) => {
+    const timestampDiff = parsePaymentTimestamp(b) - parsePaymentTimestamp(a);
+    if (timestampDiff !== 0) return timestampDiff;
+    return Number(b.id || 0) - Number(a.id || 0);
+  });
 
 const PaymentsTab = () => {
   const [payments, setPayments] = useState<PaymentData[]>([]);
@@ -84,7 +226,7 @@ const PaymentsTab = () => {
 
   useEffect(() => {
     // Filter payments based on search term
-    const filtered = payments.filter(payment => {
+    const filtered = sortPaymentsNewestFirst(payments.filter(payment => {
       const searchLower = searchTerm.toLowerCase();
       return (
         (payment.paymentId?.toLowerCase().includes(searchLower) || false) ||
@@ -93,9 +235,11 @@ const PaymentsTab = () => {
         (payment.userName?.toLowerCase().includes(searchLower) || false) ||
         (payment.userEmail?.toLowerCase().includes(searchLower) || false) ||
         (payment.status?.toLowerCase().includes(searchLower) || false) ||
-        (payment.amount?.toString().includes(searchLower) || false)
+        (payment.amount?.toString().includes(searchLower) || false) ||
+        formatDateOnly(payment).toLowerCase().includes(searchLower) ||
+        formatTimeOnly(payment).toLowerCase().includes(searchLower)
       );
-    });
+    }));
     setFilteredPayments(filtered);
     setCurrentPage(1);
   }, [searchTerm, payments]);
@@ -123,7 +267,7 @@ const PaymentsTab = () => {
       const data = await response.json();
 
       if (response.ok && data.success) {
-        const paymentsData = data.data || [];
+        const paymentsData = sortPaymentsNewestFirst(Array.isArray(data.data) ? data.data : []);
         setPayments(paymentsData);
         setFilteredPayments(paymentsData);
         calculateStats(paymentsData);
@@ -141,7 +285,7 @@ const PaymentsTab = () => {
   };
 
   const calculateStats = (paymentsData: PaymentData[]) => {
-    const successful = paymentsData.filter(p => p.status === "SUCCESS");
+    const successful = paymentsData.filter(p => p.status?.toUpperCase() === "SUCCESS");
     const total = successful.reduce((sum, p) => sum + (p.amount || 0), 0);
     const avg = successful.length > 0 ? total / successful.length : 0;
 
@@ -152,11 +296,14 @@ const PaymentsTab = () => {
     previous30Start.setDate(now.getDate() - 60);
 
     const last30Revenue = successful
-      .filter(p => new Date(p.createdAt) >= last30Start)
+      .filter(p => parsePaymentTimestamp(p) >= last30Start.getTime())
       .reduce((sum, p) => sum + (p.amount || 0), 0);
 
     const previous30Revenue = successful
-      .filter(p => new Date(p.createdAt) >= previous30Start && new Date(p.createdAt) < last30Start)
+      .filter(p => {
+        const timestamp = parsePaymentTimestamp(p);
+        return timestamp >= previous30Start.getTime() && timestamp < last30Start.getTime();
+      })
       .reduce((sum, p) => sum + (p.amount || 0), 0);
 
     const growthRate = previous30Revenue > 0
@@ -167,8 +314,8 @@ const PaymentsTab = () => {
       totalRevenue: total,
       totalTransactions: paymentsData.length,
       successfulPayments: successful.length,
-      pendingPayments: paymentsData.filter(p => p.status === "PENDING").length,
-      failedPayments: paymentsData.filter(p => p.status === "FAILED").length,
+      pendingPayments: paymentsData.filter(p => p.status?.toUpperCase() === "PENDING").length,
+      failedPayments: paymentsData.filter(p => p.status?.toUpperCase() === "FAILED").length,
       averageTransactionValue: avg,
       growthRate: growthRate
     });
@@ -178,15 +325,21 @@ const PaymentsTab = () => {
     const monthlyMap = new Map();
 
     paymentsData.forEach(payment => {
-      const date = new Date(payment.createdAt);
+      const date = getPaymentDate(payment);
+      if (!date) return;
+
       const monthYear = `${date.toLocaleString('default', { month: 'short' })} ${date.getFullYear()}`;
 
       if (!monthlyMap.has(monthYear)) {
-        monthlyMap.set(monthYear, { revenue: 0, transactions: 0 });
+        monthlyMap.set(monthYear, {
+          revenue: 0,
+          transactions: 0,
+          sortKey: new Date(date.getFullYear(), date.getMonth(), 1).getTime()
+        });
       }
 
       const data = monthlyMap.get(monthYear);
-      if (payment.status === "SUCCESS") {
+      if (payment.status?.toUpperCase() === "SUCCESS") {
         data.revenue += payment.amount || 0;
       }
       data.transactions += 1;
@@ -196,8 +349,9 @@ const PaymentsTab = () => {
     const monthlyArray = Array.from(monthlyMap.entries()).map(([month, data]) => ({
       month,
       revenue: data.revenue,
-      transactions: data.transactions
-    }));
+      transactions: data.transactions,
+      sortKey: data.sortKey
+    })).sort((a, b) => a.sortKey - b.sortKey);
 
     setMonthlyData(monthlyArray);
   };
@@ -216,45 +370,54 @@ const PaymentsTab = () => {
   };
 
   const formatAmount = (amount: number) => {
-    if (!amount) return '₹0';
     return new Intl.NumberFormat('en-IN', {
       style: 'currency',
       currency: 'INR',
       minimumFractionDigits: 0,
       maximumFractionDigits: 0
-    }).format(amount);
+    }).format(Number(amount) || 0);
   };
 
-  const formatDate = (dateString: string) => {
-    if (!dateString) return 'N/A';
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-IN', {
+  const resolveDateInput = (value: PaymentData | string | undefined | null) => {
+    if (!value) return null;
+    if (typeof value === "string") {
+      const timestamp = Date.parse(value);
+      return Number.isFinite(timestamp) ? new Date(timestamp) : null;
+    }
+    return getPaymentDate(value);
+  };
+
+  const formatDate = (value: PaymentData | string | undefined | null) => {
+    const date = resolveDateInput(value);
+    if (!date) return 'N/A';
+    return date.toLocaleDateString('en-GB', {
       day: '2-digit',
-      month: 'short',
-      year: 'numeric',
+      month: '2-digit',
+      year: '2-digit',
       hour: '2-digit',
-      minute: '2-digit'
-    });
+      minute: '2-digit',
+      second: '2-digit'
+    }).toLowerCase();
   };
 
-  const formatDateOnly = (dateString: string) => {
-    if (!dateString) return 'N/A';
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-IN', {
+  const formatDateOnly = (value: PaymentData | string | undefined | null) => {
+    const date = resolveDateInput(value);
+    if (!date) return 'N/A';
+    return date.toLocaleDateString('en-GB', {
       day: '2-digit',
-      month: 'short',
-      year: 'numeric'
+      month: '2-digit',
+      year: '2-digit'
     });
   };
 
-  const formatTimeOnly = (dateString: string) => {
-    if (!dateString) return 'N/A';
-    const date = new Date(dateString);
+  const formatTimeOnly = (value: PaymentData | string | undefined | null) => {
+    const date = resolveDateInput(value);
+    if (!date) return 'N/A';
     return date.toLocaleTimeString('en-IN', {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit'
-    });
+    }).toLowerCase();
   };
 
   const downloadReceipt = (payment: PaymentData) => {
@@ -369,7 +532,7 @@ const PaymentsTab = () => {
                 </div>
                 <div class="row">
                   <span class="label">Date:</span>
-                  <span class="value">${formatDate(payment.createdAt)}</span>
+                  <span class="value">${formatDate(payment)}</span>
                 </div>
                 <div class="row">
                   <span class="label">Organization:</span>
@@ -430,8 +593,8 @@ const PaymentsTab = () => {
         p.amount || 0,
         p.status || 'N/A',
         p.organizationName || p.organization?.organizationName || 'N/A',
-        formatDateOnly(p.createdAt),
-        formatTimeOnly(p.createdAt)
+        formatDateOnly(p),
+        formatTimeOnly(p)
       ]);
 
       const csvContent = [headers, ...csvData]
@@ -523,11 +686,11 @@ const PaymentsTab = () => {
                
                 <div>
                   <label className="text-xs text-gray-500 uppercase tracking-wide">Date</label>
-                  <p className="text-sm mt-1">{payment.createdAt ? formatDateOnly(payment.createdAt) : 'N/A'}</p>
+                  <p className="text-sm mt-1">{formatDateOnly(payment)}</p>
                 </div>
                 <div>
                   <label className="text-xs text-gray-500 uppercase tracking-wide">Time</label>
-                  <p className="text-sm mt-1">{formatTimeOnly(payment.createdAt)}</p>
+                  <p className="text-sm mt-1">{formatTimeOnly(payment)}</p>
                 </div>
               </div>
 
@@ -842,10 +1005,10 @@ const PaymentsTab = () => {
                           {getStatusBadge(payment.status)}
                         </td>
                         <td className="p-3 text-sm text-gray-500">
-                          {formatDateOnly(payment.createdAt)}
+                          {formatDateOnly(payment)}
                         </td>
                         <td className="p-3 text-sm text-gray-500">
-                          {formatTimeOnly(payment.createdAt)}
+                          {formatTimeOnly(payment)}
                         </td>
                         <td className="p-3 text-right">
                           <div className="flex justify-end gap-2">

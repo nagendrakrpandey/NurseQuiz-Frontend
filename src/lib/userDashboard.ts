@@ -40,6 +40,7 @@ export interface DashboardResponse {
   candidate_id?: number | string | null;
   registrationStatus?: string;
   currentStage?: string;
+  nextStage?: string;
   quizStatus?: string;
   examStatus?: string;
   status?: string;
@@ -100,6 +101,19 @@ export interface DashboardScoreSummary {
   attemptedQuestions: number;
   totalQuestions: number;
   completed: boolean;
+}
+
+export interface DashboardExamResult {
+  currentStage?: string;
+  nextStage?: string;
+  score?: number | string | null;
+  resultStatus?: string;
+  examStatus?: string;
+  status?: string;
+  message?: string;
+  submitted?: boolean;
+  completed?: boolean;
+  inProgress?: boolean;
 }
 
 export class DashboardRequestError extends Error {
@@ -216,6 +230,171 @@ export const fetchDashboardData = async (
   }
 
   return (result || {}) as DashboardResponse;
+};
+
+const unwrapApiData = (payload: unknown): Record<string, unknown> => {
+  if (!payload || typeof payload !== "object") return {};
+
+  let record = payload as Record<string, unknown>;
+
+  for (let depth = 0; depth < 4; depth += 1) {
+    const nested = record.data || record.result || record.examResult || record.exam;
+    if (!nested || typeof nested !== "object" || nested === record) break;
+    record = nested as Record<string, unknown>;
+  }
+
+  return record;
+};
+
+const readApiField = (record: Record<string, unknown>, aliases: string[]) => {
+  const normalizedAliases = aliases.map((alias) => alias.replace(/[_\-\s]/g, "").toLowerCase());
+  return Object.entries(record).find(([key]) =>
+    normalizedAliases.includes(key.replace(/[_\-\s]/g, "").toLowerCase()),
+  )?.[1];
+};
+
+export const normalizeExamStage = (value?: string | number | null) => {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (!normalized) return "DISTRICT";
+  if (normalized.includes("DISTRICT")) return "DISTRICT";
+  if (normalized.includes("STATE")) return "STATE";
+  if (normalized.includes("REGIONAL") || normalized.includes("REGION")) return "NATIONAL";
+  if (normalized.includes("NATIONAL")) return "NATIONAL";
+  return normalized.replace(/[\s-]+/g, "_");
+};
+
+const completedExamStatusCodes = new Set([
+  "SUBMITTED",
+  "COMPLETED",
+  "FINISHED",
+  "PASS",
+  "PASSED",
+  "FAIL",
+  "FAILED",
+  "SELECTED",
+  "NOTSELECTED",
+  "QUALIFIED",
+  "NOTQUALIFIED",
+]);
+
+export const fetchDashboardExamResult = async (signal?: AbortSignal): Promise<DashboardExamResult | null> => {
+  const token = getStoredAuthToken();
+
+  if (!token) {
+    throw new DashboardRequestError("Authentication token missing. Please login again.", 401);
+  }
+
+  const response = await fetch(`${BASE_URL}/api/exam/result`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+    signal,
+  });
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = result as Record<string, unknown> | null;
+    const message =
+      String(errorPayload?.message || errorPayload?.error || "").trim() ||
+      `Exam result API failed with status ${response.status}`;
+    throw new DashboardRequestError(message, response.status);
+  }
+
+  const data = unwrapApiData(result);
+  if (!Object.keys(data).length) return null;
+
+  const status = String(readApiField(data, ["examStatus", "quizStatus", "status"]) || "").trim();
+  const resultStatus = String(readApiField(data, ["resultStatus", "passStatus", "result"]) || "").trim();
+  const message = String(readApiField(data, ["message"]) || "").trim();
+  const normalizedStatus = normalizeStatusCode(status || resultStatus || message);
+  const isCompleted = completedExamStatusCodes.has(normalizedStatus) || /already.*submit/i.test(message);
+
+  return {
+    currentStage: String(readApiField(data, ["currentStage", "stage"]) || "").trim() || undefined,
+    nextStage: String(readApiField(data, ["nextStage"]) || "").trim() || undefined,
+    score: toNumberOrString(readApiField(data, ["score", "marks", "obtainedMarks", "obtMarks"])),
+    resultStatus: resultStatus || undefined,
+    examStatus: status || undefined,
+    status: status || undefined,
+    message: message || undefined,
+    submitted: isCompleted,
+    completed: isCompleted,
+    inProgress: ["INPROGRESS", "STARTED", "ONGOING"].includes(normalizedStatus),
+  };
+};
+
+export const mergeDashboardExamResult = (
+  dashboardData: DashboardResponse,
+  examResult: DashboardExamResult | null,
+): DashboardResponse => {
+  if (!examResult) return dashboardData;
+
+  const completed = Boolean(examResult.completed || examResult.submitted);
+  const inProgress = Boolean(examResult.inProgress) && !completed;
+  const examStatus = completed ? "COMPLETED" : inProgress ? "IN_PROGRESS" : examResult.examStatus || dashboardData.examStatus || "NOT_STARTED";
+
+  return {
+    ...dashboardData,
+    currentStage: examResult.currentStage || dashboardData.currentStage,
+    nextStage: examResult.nextStage || dashboardData.nextStage,
+    score: examResult.score ?? dashboardData.score,
+    marks: examResult.score ?? dashboardData.marks,
+    obtainedMarks: examResult.score ?? dashboardData.obtainedMarks,
+    resultStatus: examResult.resultStatus || dashboardData.resultStatus,
+    quizStatus: examStatus,
+    examStatus,
+    status: examStatus,
+    quizAvailable: completed ? false : dashboardData.quizAvailable,
+  };
+};
+
+export const startDashboardExam = async (stage?: string | number | null) => {
+  const token = getStoredAuthToken();
+
+  if (!token) {
+    throw new DashboardRequestError("Authentication token missing. Please login again.", 401);
+  }
+
+  const response = await fetch(`${BASE_URL}/api/exam/start`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ stage: normalizeExamStage(stage) }),
+  });
+
+  const result = await response.json().catch(() => null);
+  const record = unwrapApiData(result);
+  const batchRecord =
+    record.batch && typeof record.batch === "object"
+      ? record.batch as Record<string, unknown>
+      : {};
+  const message = String(readApiField(record, ["message", "error"]) || "").trim();
+  const batchId = Number(
+    readApiField(record, ["batchId", "batch_id", "id"]) ||
+      readApiField(batchRecord, ["batchId", "batch_id", "id"]) ||
+      0,
+  ) || null;
+  const batchCode = String(
+    readApiField(record, ["batchCode", "batch_code", "code"]) ||
+      readApiField(batchRecord, ["batchCode", "batch_code", "code"]) ||
+      "",
+  ).trim();
+  const level = String(
+    readApiField(record, ["level", "stage", "currentStage"]) ||
+      readApiField(batchRecord, ["level"]) ||
+      "",
+  ).trim();
+
+  if (!response.ok || (result && typeof result === "object" && (result as Record<string, unknown>).success === false)) {
+    throw new DashboardRequestError(message || "Unable to start exam.", response.status);
+  }
+
+  return { message, stage: normalizeExamStage(stage), batchId, batchCode, level };
 };
 
 export const saveDashboardExamCompletionOverride = (
@@ -621,33 +800,20 @@ const isStatusOrEligibilityNotification = (notification: DashboardNotification) 
   const title = String(notification.title || "").toLowerCase();
   const description = String(notification.desc || notification.description || "").toLowerCase();
   const text = `${title} ${description}`;
+  const resultMessagePattern =
+    /congrat|sorry.*eligible|next\s*round.*eligible|eligible.*next\s*round|next\s*round.*qualif|qualif.*next\s*round/;
 
   return (
     title.includes("quiz status") ||
     title.includes("quiz completed") ||
-    text.includes("eligible for next round") ||
-    text.includes("not eligible for next round")
+    resultMessagePattern.test(text)
   );
 };
 
 const getCompletionNotifications = (dashboardData: DashboardResponse) => {
-  const eligibility = getDashboardEligibility(dashboardData);
   const existingNotifications = Array.isArray(dashboardData.notifications)
     ? dashboardData.notifications.filter((notification) => !isStatusOrEligibilityNotification(notification))
     : [];
-  const eligibilityNotification =
-    eligibility === null
-      ? []
-      : [
-          {
-            title: eligibility ? "Next Round Eligible" : "Next Round Not Eligible",
-            desc: eligibility
-              ? "Congratulations, you are eligible for the next round."
-              : "Sorry, you are not eligible for the next round.",
-            type: eligibility ? "success" : "warning",
-            time: "Now",
-          } satisfies DashboardNotification,
-        ];
 
   return [
     {
@@ -656,7 +822,6 @@ const getCompletionNotifications = (dashboardData: DashboardResponse) => {
       type: "success",
       time: "Now",
     },
-    ...eligibilityNotification,
     ...existingNotifications,
   ];
 };
@@ -733,14 +898,13 @@ const getCompletedDashboardCertificates = (
   dashboardData: DashboardResponse,
   effectiveUserId: number | string | null,
 ) => {
-  const scoreLabel = getDashboardScorePercentLabel(dashboardData);
   const participationCertificate = {
     name: "Participation Certificate",
     status: "Available",
     downloadUrl: effectiveUserId ? `/api/certificates/download/${effectiveUserId}/participation` : null,
   };
   const qualificationCertificate = {
-    name: `Qualification Certificate${scoreLabel ? ` (${scoreLabel})` : ""}`,
+    name: "Qualification Certificate",
     status: "Available",
     downloadUrl: effectiveUserId ? `/api/certificates/download/${effectiveUserId}/qualification` : null,
     scorePercentage: getDashboardScoreSummary(dashboardData)?.percentage ?? null,
@@ -780,10 +944,7 @@ const getCompletedDashboardCertificates = (
 
         return {
           ...certificate,
-          name:
-            scoreLabel && !certificateName.includes(scoreLabel)
-              ? `${certificateName} (${scoreLabel})`
-              : certificateName,
+          name: getCertificateName(certificate),
           status: "Available",
           downloadUrl: certificate.downloadUrl || qualificationCertificate.downloadUrl,
           scorePercentage: qualificationCertificate.scorePercentage,
@@ -883,7 +1044,9 @@ export const getDashboardLevels = (dashboardData: DashboardResponse | null) =>
   getConfiguredDashboardLevels(dashboardData);
 
 export const getDashboardNotifications = (dashboardData: DashboardResponse | null) =>
-  Array.isArray(dashboardData?.notifications) ? dashboardData.notifications : [];
+  Array.isArray(dashboardData?.notifications)
+    ? dashboardData.notifications.filter((notification) => !isStatusOrEligibilityNotification(notification))
+    : [];
 
 export const getDashboardCertificates = (dashboardData: DashboardResponse | null) =>
   Array.isArray(dashboardData?.certificates) ? dashboardData.certificates : [];
@@ -954,8 +1117,14 @@ export const getLevelDate = (
 export const getNotificationDescription = (notification: DashboardNotification) =>
   formatDashboardMessage(notification.desc || notification.description || "");
 
-export const getCertificateName = (certificate: DashboardCertificate) =>
-  certificate.name || certificate.title || "Certificate";
+export const getCertificateName = (certificate: DashboardCertificate) => {
+  const certificateName = certificate.name || certificate.title || "Certificate";
+  const isQualificationCertificate = /qualification|selection/i.test(certificateName);
+
+  return isQualificationCertificate
+    ? certificateName.replace(/\s*\(\s*\d+(?:\.\d+)?\s*%\s*\)\s*$/i, "").trim()
+    : certificateName;
+};
 
 export const isCertificateAvailable = (status?: string) =>
   String(status || "").trim().toLowerCase() === "available";

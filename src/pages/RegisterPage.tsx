@@ -14,7 +14,6 @@ import {
   CheckCircle2,
   Building2,
   Users,
-  FileUp,
   CreditCard,
   PartyPopper,
   ArrowLeft,
@@ -27,23 +26,61 @@ import {
 } from "lucide-react";
 import { BASE_URL } from "@/Service/api";
 
+interface RazorpayPaymentResponse {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+}
+
+interface RazorpayFailedResponse {
+  error?: {
+    description?: string;
+  };
+}
+
+interface RazorpayInstance {
+  on: (event: "payment.failed", handler: (response: RazorpayFailedResponse) => void) => void;
+  open: () => void;
+}
+
+interface RazorpayOptions {
+  key: string;
+  amount: number;
+  currency: string;
+  order_id: string;
+  name: string;
+  description: string;
+  handler: (response: RazorpayPaymentResponse) => void;
+  prefill: {
+    email: string;
+    contact: string;
+  };
+  theme: {
+    color: string;
+  };
+  modal: {
+    ondismiss: () => void;
+  };
+}
+
 declare global {
   interface Window {
-    Razorpay: any;
+    Razorpay: new (options: RazorpayOptions) => RazorpayInstance;
   }
 }
 
 const steps = [
   { icon: Building2, label: "Organization" },
   { icon: Users, label: "Team" },
-  { icon: FileUp, label: "Documents" },
   { icon: CreditCard, label: "Payment" },
   { icon: PartyPopper, label: "Confirmation" },
 ];
 
 interface RegisterFormData {
   organizationName: string;
-  registrationNumber: string;
+  hospitalRegisteredId: string;
+  spocName: string;
+  hospitalCategory: string;
   pincode: string;
   state: string;
   district: string;
@@ -55,14 +92,13 @@ interface RegisterFormData {
 interface Member {
   name: string;
   email: string;
+  hospitalEmployeeId: string;
   role: string;
+  customRole: string;
+  evidence?: File | string | null;
 }
 
-interface Documents {
-  registrationCert: File | string | null;
-  teamLeadId: File | string | null;
-  nursingCouncilReg: File | string | null;
-}
+type MemberTextField = Exclude<keyof Member, "evidence">;
 
 interface DialogState {
   isOpen: boolean;
@@ -75,6 +111,32 @@ interface RoleOption {
   value: string;
   label: string;
 }
+
+const HOSPITAL_CATEGORIES = [
+  "Large Hospitals (300+ beds)",
+  "Mid-sized Hospitals (100-300 beds)",
+  "Small Hospitals (<100 beds)",
+];
+
+const OTHER_ROLE_VALUE = "OTHER";
+
+const DEFAULT_ROLE_OPTIONS: RoleOption[] = [
+  { value: "OT", label: "OT" },
+  { value: "ICCU", label: "ICCU" },
+  { value: "CSSD", label: "CSSD" },
+  { value: OTHER_ROLE_VALUE, label: "Other" },
+];
+
+const MAX_PDF_SIZE_BYTES = 10 * 1024 * 1024;
+
+const createEmptyMember = (): Member => ({
+  name: "",
+  email: "",
+  hospitalEmployeeId: "",
+  role: "",
+  customRole: "",
+  evidence: null,
+});
 
 const CustomDialog = ({
   isOpen,
@@ -152,7 +214,9 @@ const RegisterPage = () => {
 
   const [formData, setFormData] = useState<RegisterFormData>({
     organizationName: "",
-    registrationNumber: "",
+    hospitalRegisteredId: "",
+    spocName: "",
+    hospitalCategory: "",
     address: "",
     pincode: "",
     state: "",
@@ -161,15 +225,9 @@ const RegisterPage = () => {
     orgPhone: ""
   });
 
-  const [members, setMembers] = useState<Member[]>([
-    { name: "", email: "", role: "" }
-  ]);
-
-  const [documents, setDocuments] = useState<Documents>({
-    registrationCert: null,
-    teamLeadId: null,
-    nursingCouncilReg: null
-  });
+  const [members, setMembers] = useState<Member[]>([createEmptyMember()]);
+  const [hospitalRegistrationCertificate, setHospitalRegistrationCertificate] = useState<File | string | null>(null);
+  const [roleOptions, setRoleOptions] = useState<RoleOption[]>(DEFAULT_ROLE_OPTIONS);
 
   const [paymentCompleted, setPaymentCompleted] = useState<boolean>(false);
   const [paymentProcessing, setPaymentProcessing] = useState<boolean>(false);
@@ -184,6 +242,228 @@ const RegisterPage = () => {
 
   const closeDialog = () => {
     setDialog({ isOpen: false, title: "", message: "", type: "info" });
+  };
+
+  const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
+  const getDuplicateTeamEmail = () => {
+    const emailCounts = new Map<string, number>();
+
+    members.forEach((member) => {
+      const email = normalizeEmail(member.email);
+      if (email) emailCounts.set(email, (emailCounts.get(email) || 0) + 1);
+    });
+
+    return Array.from(emailCounts.entries()).find(([, count]) => count > 1)?.[0] || "";
+  };
+
+  const getEvidenceKey = (file: File | string | null | undefined) => {
+    if (!file) return "";
+    if (file instanceof File) return `${file.name.trim().toLowerCase()}-${file.size}`;
+    return "";
+  };
+
+  const getDuplicateTeamDocument = () => {
+    const documentCounts = new Map<string, number>();
+
+    members.forEach((member) => {
+      const documentKey = getEvidenceKey(member.evidence);
+      if (documentKey) documentCounts.set(documentKey, (documentCounts.get(documentKey) || 0) + 1);
+    });
+
+    return Array.from(documentCounts.entries()).find(([, count]) => count > 1)?.[0] || "";
+  };
+
+  const asRecord = (value: unknown): Record<string, unknown> =>
+    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+  const getHospitalRegistrationCertificatePath = (value: unknown): string =>
+    String(
+      readFieldByAliases(value, [
+        "hospitalRegistrationCertificatePath",
+        "hospitalRegistrationCertificate",
+        "registrationCertPath",
+        "registrationCertificatePath",
+        "certificatePath",
+      ]) || ""
+    ).trim();
+
+  const normalizeRoleOptions = (value: unknown): RoleOption[] => {
+    const record = asRecord(value);
+    const source = Array.isArray(record.data)
+      ? record.data
+      : Array.isArray(record.roles)
+        ? record.roles
+        : Array.isArray(value)
+          ? value
+          : [];
+
+    const normalizedRoles = source
+      .map((item: unknown) => {
+        if (typeof item === "string") {
+          const trimmed = item.trim();
+          return trimmed ? { value: trimmed, label: trimmed } : null;
+        }
+
+        const itemRecord = asRecord(item);
+        const value = String(itemRecord.value || itemRecord.code || itemRecord.name || itemRecord.label || "").trim();
+        const label = String(itemRecord.label || itemRecord.name || itemRecord.value || itemRecord.code || "").trim();
+        if (!value) return null;
+        return (value.toLowerCase() === "other" || label.toLowerCase() === "other")
+          ? { value: OTHER_ROLE_VALUE, label: "Other" }
+          : { value, label: label || value };
+      })
+      .filter(Boolean) as RoleOption[];
+
+    const hasOther = normalizedRoles.some((role) => role.value === OTHER_ROLE_VALUE || role.label.toLowerCase() === "other");
+    return [...normalizedRoles, ...(hasOther ? [] : [{ value: OTHER_ROLE_VALUE, label: "Other" }])];
+  };
+
+  const getApiErrorMessage = (data: unknown, fallback: string) => {
+    const record = asRecord(data);
+    const message = String(record.message || record.error || fallback);
+    const normalized = message.toLowerCase();
+
+    if (
+      (normalized.includes("email") || normalized.includes("mail")) &&
+      (normalized.includes("already") || normalized.includes("exist") || normalized.includes("duplicate"))
+    ) {
+      return "Email already exists";
+    }
+
+    if (
+      (normalized.includes("document") || normalized.includes("file")) &&
+      (normalized.includes("already") || normalized.includes("exist") || normalized.includes("duplicate"))
+    ) {
+      return "Document already exists";
+    }
+
+    return message;
+  };
+
+  const readFieldByAliases = (value: unknown, aliases: string[]) => {
+    const record = asRecord(value);
+    if (!Object.keys(record).length) return undefined;
+    const normalizedAliases = aliases.map((alias) => alias.replace(/[_\-\s]/g, "").toLowerCase());
+
+    return Object.entries(record).find(([key]) =>
+      normalizedAliases.includes(key.replace(/[_\-\s]/g, "").toLowerCase())
+    )?.[1];
+  };
+
+  const normalizeRole = (value: unknown) => {
+    const rawRole = String(
+      readFieldByAliases(value, ["role", "department", "departmentName"]) ||
+      ""
+    ).trim();
+    const rawRoleId = String(
+      readFieldByAliases(value, ["roleId", "role_id", "departmentId", "department_id"]) ||
+      ""
+    ).trim();
+    const roleKey = (rawRole || rawRoleId).toLowerCase();
+
+    if (roleKey === "1" || roleKey === "lead" || roleKey === "ot" || roleKey.includes("operation")) return "OT";
+    if (roleKey === "2" || roleKey === "member" || roleKey === "iccu" || roleKey.includes("intensive")) return "ICCU";
+    if (roleKey === "3" || roleKey === "admin" || roleKey === "cssd" || roleKey.includes("sterile")) return "CSSD";
+
+    return rawRole;
+  };
+
+  const normalizeMemberRoleFields = (value: unknown) => {
+    const normalizedRole = normalizeRole(value);
+    const customRole = String(readFieldByAliases(value, ["customRole", "otherRole", "manualRole"]) || "").trim();
+    const knownRole = DEFAULT_ROLE_OPTIONS.find((role) => role.value === normalizedRole && role.value !== OTHER_ROLE_VALUE);
+
+    if (normalizedRole === OTHER_ROLE_VALUE) {
+      return { role: OTHER_ROLE_VALUE, customRole };
+    }
+
+    return knownRole || !normalizedRole
+      ? { role: normalizedRole, customRole: "" }
+      : { role: OTHER_ROLE_VALUE, customRole: normalizedRole };
+  };
+
+  const getMemberEvidence = (value: unknown): File | string | null => {
+    const record = asRecord(value);
+    const evidence =
+      record.evidence || record.evidencePath ||record.evidenceUrl ||
+      record.document || record.documentPath ||record.documentUrl ||
+      record.uploadDocument || record.uploadDocumentPath ||
+      record.memberEvidence || record.memberEvidencePath ||
+      record.memberDocument || record.memberDocumentPath ||
+      record.employeeDocument || record.employeeDocumentPath ||
+      record.hospitalEmployeeDocument || record.hospitalEmployeeDocumentPath ||
+      record.hospitalEmployeeIdDocument ||
+      record.hospitalEmployeeIdDocumentPath ||
+      record.candidateEvidence ||
+      record.candidateEvidencePath ||
+      record.candidateDocument ||
+      record.candidateDocumentPath ||
+      record.filePath ||
+      record.path ||
+      record.idProofPath ||
+      null;
+    return evidence instanceof File || typeof evidence === "string" ? evidence : null;
+  };
+
+  const normalizeMember = (value: unknown, evidenceFallback: File | string | null = null): Member => {
+    const roleFields = normalizeMemberRoleFields(value);
+
+    return {
+      name: String(readFieldByAliases(value, ["name", "fullName", "memberName"]) || ""),
+      email: String(readFieldByAliases(value, ["email", "memberEmail", "userEmail"]) || ""),
+      hospitalEmployeeId: String(
+        readFieldByAliases(value, ["hospitalEmployeeId", "hospital_employee_id", "employeeId", "employee_id"]) || ""
+      ),
+      role: roleFields.role,
+      customRole: roleFields.customRole,
+      evidence: getMemberEvidence(value) || evidenceFallback
+    };
+  };
+
+  const getFileName = (file: File | string | null | undefined) => {
+    if (!file) return "";
+    return typeof file === "string" ? file.split(/[\\/]/).pop() || file : file.name;
+  };
+
+  const collectDocumentPaths = (value: unknown, paths: string[] = []) => {
+    if (Array.isArray(value)) {
+      value.forEach((item) => collectDocumentPaths(item, paths));
+      return paths;
+    }
+
+    if (!value || typeof value !== "object") return paths;
+
+    Object.entries(value).forEach(([key, item]) => {
+      const normalizedKey = key.replace(/[_\-\s]/g, "").toLowerCase();
+
+      if (
+        typeof item === "string" &&
+        item.trim() &&
+        (
+          normalizedKey.includes("memberevidence") ||normalizedKey.includes("candidateevidence") ||normalizedKey.includes("memberdocument") ||
+          normalizedKey.includes("candidatedocument") ||normalizedKey.includes("employeedocument") || normalizedKey.includes("hospitalemployeedocument") ||
+          normalizedKey.includes("hospitalemployeeiddocument") || normalizedKey.includes("idproof") || normalizedKey.includes("teamleadid")
+        )
+      ) { paths.push(item); return;}
+
+      if (item && typeof item === "object") collectDocumentPaths(item, paths);
+    });
+
+    return paths;
+  };
+
+  const normalizeTeamMembers = (teamRows: unknown[], evidenceFromDocuments: Array<File | string | null>) => {
+    const membersByKey = new Map<string, Member>();
+
+    teamRows.forEach((member, index) => {
+      const normalizedMember = normalizeMember(member, evidenceFromDocuments[index] || null);
+      const key = normalizeEmail(normalizedMember.email) || `${normalizedMember.name.trim().toLowerCase()}-${normalizedMember.role}`;
+
+      if (!membersByKey.has(key)) membersByKey.set(key, normalizedMember);
+    });
+
+    return Array.from(membersByKey.values()).slice(0, 3);
   };
 
   useEffect(() => {
@@ -211,7 +491,9 @@ const RegisterPage = () => {
         if (response.ok && data && data.id) {
           setFormData({
             organizationName: data.organizationName || "",
-            registrationNumber: data.registrationNumber || "",
+            hospitalRegisteredId: data.hospitalRegisteredId || data.registrationNumber || "",
+            spocName: data.spocName || data.spoc || data.contactPersonName || "",
+            hospitalCategory: data.hospitalCategory || "",
             pincode: data.pincode || "",
             state: data.state || "",
             district: data.district || "",
@@ -227,11 +509,30 @@ const RegisterPage = () => {
           if (data.enrollmentNumber) {
             setEnrollmentNumber(data.enrollmentNumber);
           }
+
+          setHospitalRegistrationCertificate(getHospitalRegistrationCertificatePath(data) || null);
         } else {
           setFormData(prev => ({
             ...prev,
             orgEmail: ""
           }));
+        }
+
+        try {
+          const docsResponse = await fetch(`${BASE_URL}/api/register/get/documents`, {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+          const docsData = await docsResponse.json();
+          const certificatePath = docsResponse.ok && docsData?.data
+            ? getHospitalRegistrationCertificatePath(docsData.data)
+            : "";
+
+          if (certificatePath) setHospitalRegistrationCertificate(certificatePath);
+        } catch (err) {
+          console.error("Error fetching registration certificate:", err);
         }
       } catch (err) {
         console.error("Error fetching existing data:", err);
@@ -241,6 +542,30 @@ const RegisterPage = () => {
     };
 
     fetchExistingData();
+  }, []);
+
+  useEffect(() => {
+    const fetchRoles = async () => {
+      const token = localStorage.getItem("token");
+      if (!token) return;
+
+      try {
+        const response = await fetch(`${BASE_URL}/api/register/roles`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        const data = await response.json();
+        const normalizedRoles = response.ok ? normalizeRoleOptions(data) : [];
+
+        if (normalizedRoles.length > 1) setRoleOptions(normalizedRoles);
+      } catch (err) {
+        console.warn("Unable to load role config; using default roles.", err);
+      }
+    };
+
+    fetchRoles();
   }, []);
 
   useEffect(() => {
@@ -293,9 +618,36 @@ const RegisterPage = () => {
         console.log("Fetched team:", data);
 
         if (res.ok && data.data && data.data.length > 0) {
-          setMembers(data.data);
+          let evidenceFromDocuments: Array<File | string | null> = [];
+
+          try {
+            const docsRes = await fetch(`${BASE_URL}/api/register/get/documents`, {
+              method: "GET",
+              headers: {
+                Authorization: `Bearer ${token}`
+              }
+            });
+            const docsData = await docsRes.json();
+
+            if (docsRes.ok && docsData.data) {
+              const certificatePath = getHospitalRegistrationCertificatePath(docsData.data);
+              if (certificatePath) setHospitalRegistrationCertificate(certificatePath);
+
+              const collectedPaths = collectDocumentPaths(docsData.data);
+              evidenceFromDocuments = [
+                docsData.data.candidateEvidence1Path || docsData.data.memberEvidence1Path || collectedPaths[0] || null,
+                docsData.data.candidateEvidence2Path || docsData.data.memberEvidence2Path || collectedPaths[1] || null,
+                docsData.data.candidateEvidence3Path || docsData.data.memberEvidence3Path || collectedPaths[2] || null
+              ];
+            }
+          } catch (err) {
+            console.error("Error fetching member evidence:", err);
+          }
+
+          const normalizedMembers = normalizeTeamMembers(data.data, evidenceFromDocuments);
+          setMembers(normalizedMembers.length ? normalizedMembers : [createEmptyMember()]);
         } else {
-          setMembers([{ name: "", email: "", role: "" }]);
+          setMembers([createEmptyMember()]);
         }
       } catch (err) {
         console.error("Error fetching team:", err);
@@ -304,39 +656,6 @@ const RegisterPage = () => {
 
     if (step === 1) {
       fetchTeam();
-    }
-  }, [step]);
-
-  useEffect(() => {
-    const fetchDocuments = async () => {
-      const token = localStorage.getItem("token");
-      if (!token) return;
-
-      try {
-        const res = await fetch(`${BASE_URL}/api/register/get/documents`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        });
-
-        const data = await res.json();
-        console.log("Fetched documents:", data);
-
-        if (res.ok && data.data) {
-          setDocuments({
-            registrationCert: data.data.registrationCertPath || null,
-            teamLeadId: data.data.teamLeadIdPath || null,
-            nursingCouncilReg: data.data.nursingCouncilRegPath || null
-          });
-        }
-      } catch (err) {
-        console.error("Error fetching documents:", err);
-      }
-    };
-
-    if (step === 2) {
-      fetchDocuments();
     }
   }, [step]);
 
@@ -351,7 +670,7 @@ const RegisterPage = () => {
 
   const handleMemberChange = (
     index: number,
-    field: keyof Member,
+    field: MemberTextField,
     value: string
   ) => {
     const updatedMembers = [...members];
@@ -361,7 +680,7 @@ const RegisterPage = () => {
 
   const addMember = () => {
     if (members.length >= 3) return;
-    setMembers([...members, { name: "", email: "", role: "" }]);
+    setMembers([...members, createEmptyMember()]);
   };
 
   const removeMember = (index: number) => {
@@ -370,15 +689,16 @@ const RegisterPage = () => {
     }
   };
 
-  const validateZipFile = (file: File): boolean => {
+  const validatePdfFile = (file: File): boolean => {
     if (!file) return false;
 
     const fileExt = file.name.split(".").pop()?.toLowerCase();
-    const isValidExt = fileExt === "zip";
-    const isValidSize = file.size <= 10 * 1024 * 1024;
+    const isValidExt = fileExt === "pdf";
+    const isValidMime = !file.type || file.type === "application/pdf";
+    const isValidSize = file.size <= MAX_PDF_SIZE_BYTES;
 
-    if (!isValidExt) {
-      showDialog("Invalid File Type", "Only ZIP files are allowed for document upload.", "error");
+    if (!isValidExt || !isValidMime) {
+      showDialog("Invalid File Type", "Only PDF files are allowed for document upload.", "error");
       return false;
     }
 
@@ -390,13 +710,19 @@ const RegisterPage = () => {
     return true;
   };
 
-  const handleFileUpload = (docType: keyof Documents, file: File | null) => {
-    if (file && validateZipFile(file)) {
-      setDocuments(prev => ({
-        ...prev,
-        [docType]: file
-      }));
-    }
+  const handleHospitalRegistrationCertificateUpload = (file: File | null) => {
+    if (!file || !validatePdfFile(file)) return;
+    setHospitalRegistrationCertificate(file);
+  };
+
+  const handleMemberDocumentUpload = (index: number, file: File | null) => {
+    if (!file || !validatePdfFile(file)) return;
+
+    setMembers(prev =>
+      prev.map((member, memberIndex) =>
+        memberIndex === index ? { ...member, evidence: file } : member
+      )
+    );
   };
 
   const handleSaveOrganization = async () => {
@@ -405,8 +731,18 @@ const RegisterPage = () => {
       return;
     }
 
-    if (!formData.registrationNumber || formData.registrationNumber.trim() === "") {
-      showDialog("Warning Error", "Please enter registration number", "error");
+    if (!formData.hospitalRegisteredId || formData.hospitalRegisteredId.trim() === "") {
+      showDialog("Warning Error", "Please enter hospital registered ID", "error");
+      return;
+    }
+
+    if (!formData.spocName || formData.spocName.trim() === "") {
+      showDialog("Warning Error", "Please enter SPOC name", "error");
+      return;
+    }
+
+    if (!formData.hospitalCategory) {
+      showDialog("Warning Error", "Please select hospital category", "error");
       return;
     }
 
@@ -442,6 +778,11 @@ const RegisterPage = () => {
       return;
     }
 
+    if (!hospitalRegistrationCertificate) {
+      showDialog("Warning Error", "Please upload Hospital Registration Certificate (PDF)", "error");
+      return;
+    }
+
     setLoading(true);
 
     const token = localStorage.getItem("token");
@@ -453,13 +794,23 @@ const RegisterPage = () => {
     }
 
     try {
+      const organizationPayload = new FormData();
+      Object.entries(formData).forEach(([key, value]) => {
+        organizationPayload.append(key, String(value || "").trim());
+      });
+
+      if (hospitalRegistrationCertificate instanceof File) {
+        organizationPayload.append("hospitalRegistrationCertificate", hospitalRegistrationCertificate);
+      } else if (hospitalRegistrationCertificate) {
+        organizationPayload.append("hospitalRegistrationCertificatePath", hospitalRegistrationCertificate);
+      }
+
       const response = await fetch(`${BASE_URL}/api/register/save`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify(formData)
+        body: organizationPayload
       });
 
       const data = await response.json();
@@ -502,10 +853,37 @@ const RegisterPage = () => {
         return;
       }
 
+      if (!members[i].hospitalEmployeeId || members[i].hospitalEmployeeId.trim() === "") {
+        showDialog("Warning Error", `Please enter hospital employee ID for member ${i + 1}`, "error");
+        return;
+      }
+
       if (!members[i].role) {
         showDialog("Warning Error", `Please select role for member ${i + 1}`, "error");
         return;
       }
+
+      if (members[i].role === OTHER_ROLE_VALUE && !members[i].customRole.trim()) {
+        showDialog("Warning Error", `Please enter role for member ${i + 1}`, "error");
+        return;
+      }
+
+      if (!members[i].evidence) {
+        showDialog("Warning Error", `Please upload PDF document for member ${i + 1}`, "error");
+        return;
+      }
+    }
+
+    const duplicateEmail = getDuplicateTeamEmail();
+    if (duplicateEmail) {
+      showDialog("Email Already Exists", "Email already exists", "error");
+      return;
+    }
+
+    const duplicateDocument = getDuplicateTeamDocument();
+    if (duplicateDocument) {
+      showDialog("Document Already Exists", "Document already exists", "error");
+      return;
     }
 
     setLoading(true);
@@ -519,13 +897,33 @@ const RegisterPage = () => {
     }
 
     try {
+      const teamPayload = members.map((member, index) => ({
+        name: member.name.trim(),
+        email: normalizeEmail(member.email),
+        hospitalEmployeeId: member.hospitalEmployeeId.trim(),
+        role: member.role === OTHER_ROLE_VALUE ? member.customRole.trim() : member.role,
+        roleType: member.role,
+        customRole: member.role === OTHER_ROLE_VALUE ? member.customRole.trim() : "",
+        evidencePath: typeof member.evidence === "string" ? member.evidence : undefined,
+        evidenceFileName: getFileName(member.evidence),
+        evidenceField: `employeeDocument${index + 1}`
+      }));
+
+      const teamFormData = new FormData();
+      teamFormData.append("members", JSON.stringify(teamPayload));
+      teamFormData.append("teamMembers", JSON.stringify(teamPayload));
+      members.forEach((member, index) => {
+        if (member.evidence instanceof File) {
+          teamFormData.append(`employeeDocument${index + 1}`, member.evidence);
+        }
+      });
+
       const response = await fetch(`${BASE_URL}/api/register/team`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify(members)
+        body: teamFormData
       });
 
       const data = await response.json();
@@ -534,68 +932,10 @@ const RegisterPage = () => {
         showDialog("Success", "Team members saved successfully!", "success");
         setStep(prev => prev + 1);
       } else {
-        showDialog("Error", data.message || "Failed to save team members", "error");
+        showDialog("Error", getApiErrorMessage(data, "Failed to save team members"), "error");
       }
     } catch (err) {
       console.error("Error saving team:", err);
-      showDialog("Network Error", "Please check your connection and try again.", "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSaveDocuments = async () => {
-    if (!documents.registrationCert) {
-      showDialog("Warning Error", "Please upload Organization Registration Certificate (ZIP file only)", "error");
-      return;
-    }
-
-    if (!documents.teamLeadId) {
-      showDialog("Warning Error", "Please upload Team's Members ID Proof (ZIP file only)", "error");
-      return;
-    }
-
-    if (!documents.nursingCouncilReg) {
-      showDialog("Warning Error", "Please upload Nursing Council Registration (ZIP file only)", "error");
-      return;
-    }
-
-    setLoading(true);
-
-    const token = localStorage.getItem("token");
-
-    if (!token) {
-      showDialog("Authentication Error", "Please login again", "error");
-      setLoading(false);
-      return;
-    }
-
-    try {
-      const formDataObj = new FormData();
-
-      formDataObj.append("registrationCert", documents.registrationCert as File);
-      formDataObj.append("teamLeadId", documents.teamLeadId as File);
-      formDataObj.append("nursingCouncilReg", documents.nursingCouncilReg as File);
-      formDataObj.append("organizationId", formData.registrationNumber);
-
-      const response = await fetch(`${BASE_URL}/api/register/documents`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`
-        },
-        body: formDataObj
-      });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        showDialog("Success", "Documents uploaded successfully!", "success");
-        setStep(prev => prev + 1);
-      } else {
-        showDialog("Error", data.message || "Failed to upload documents", "error");
-      }
-    } catch (err) {
-      console.error("Error uploading documents:", err);
       showDialog("Network Error", "Please check your connection and try again.", "error");
     } finally {
       setLoading(false);
@@ -645,7 +985,7 @@ const RegisterPage = () => {
         name: "Nurse Quiz",
         description: "Registration Payment",
 
-        handler: async function (response: any) {
+        handler: async function (response: RazorpayPaymentResponse) {
           console.log("Razorpay Response:", response);
 
           try {
@@ -660,7 +1000,7 @@ const RegisterPage = () => {
                 paymentId: response.razorpay_payment_id,
                 signature: response.razorpay_signature,
                 amount: order.amount / 100,
-                organizationId: formData.registrationNumber
+                organizationId: formData.hospitalRegisteredId
               })
             });
 
@@ -676,9 +1016,7 @@ const RegisterPage = () => {
                 `NQ-2026-${Math.floor(Math.random() * 10000)}`
               );
 
-              // ✅ Enrollment number directly field se bhi lega,
-              // ✅ data object se bhi lega,
-              // ✅ aur backend message string se bhi extract karega.
+
               const enrollmentFromMessage =
                 typeof verifyData.message === "string"
                   ? verifyData.message.match(/ENR_\d+/)?.[0] || ""
@@ -741,7 +1079,7 @@ const RegisterPage = () => {
 
       const rzp = new window.Razorpay(options);
 
-      rzp.on("payment.failed", function (response: any) {
+      rzp.on("payment.failed", function (response: RazorpayFailedResponse) {
         console.error("Payment Failed:", response);
 
         showDialog(
@@ -773,8 +1111,6 @@ const RegisterPage = () => {
     } else if (step === 1) {
       handleSaveTeam();
     } else if (step === 2) {
-      handleSaveDocuments();
-    } else if (step === 3) {
       handlePayment();
     }
   };
@@ -783,19 +1119,16 @@ const RegisterPage = () => {
     setStep(prev => Math.max(0, prev - 1));
   };
 
-  const roles: RoleOption[] = [
-    { value: "OT", label: "OT" },
-    { value: "ICCU", label: "ICCU" },
-    { value: "CSSD", label: "CSSD" }
-  ];
-
   const getAvailableRoles = (currentIndex: number): RoleOption[] => {
     const selectedRoles = members
       .map((m, i) => (i !== currentIndex ? m.role : null))
       .filter(Boolean);
 
-    return roles.filter(role => !selectedRoles.includes(role.value));
+    return roleOptions.filter(role => role.value === OTHER_ROLE_VALUE || !selectedRoles.includes(role.value));
   };
+
+  const duplicateTeamEmail = getDuplicateTeamEmail();
+  const duplicateTeamDocument = getDuplicateTeamDocument();
 
   if (pageLoading) {
     return (
@@ -820,37 +1153,49 @@ const RegisterPage = () => {
 
       <div className="flex min-h-screen flex-col bg-gradient-to-br from-slate-50 to-slate-100">
         <div className="flex-1 py-6 sm:py-12">
-          <div className="mx-auto w-full max-w-4xl px-3 sm:px-4">
-            <div className="mb-8 flex items-center justify-between overflow-x-auto pb-2 sm:mb-10">
-              {steps.map((s, i) => (
-                <div key={s.label} className="flex items-center">
-                  <div className="flex flex-col items-center">
-                    <div
-                      className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold transition-colors ${i <= step
-                        ? "bg-emerald-600 text-white"
-                        : "bg-gray-200 text-gray-500"
-                        }`}
-                    >
-                      {i < step ? (
-                        <CheckCircle2 className="h-5 w-5" />
-                      ) : (
-                        <s.icon className="h-5 w-5" />
+          <div className="mx-auto w-full max-w-6xl px-3 sm:px-4 lg:px-6">
+            <div className="mb-8 sm:mb-10">
+              <div className="grid grid-cols-4">
+                {steps.map((s, i) => {
+                  const isDone = i < step;
+                  const isCurrent = i === step;
+                  const isReached = i <= step;
+
+                  return (
+                    <div key={s.label} className="relative flex min-w-0 flex-col items-center">
+                      {i < steps.length - 1 && (
+                        <div
+                          className={`absolute left-[calc(50%+24px)] right-[calc(-50%+24px)] top-[22px] h-0.5 rounded-full transition-colors ${
+                            i < step ? "bg-emerald-500" : "bg-slate-200"
+                          }`}
+                        />
                       )}
-                    </div>
 
-                    <span className="text-xs mt-2 text-gray-600 hidden sm:block">
-                      {s.label}
-                    </span>
-                  </div>
-
-                  {i < steps.length - 1 && (
-                    <div
-                      className={`mx-1 h-0.5 w-7 transition-colors sm:mx-2 sm:w-16 ${i < step ? "bg-emerald-600" : "bg-gray-200"
+                      <div
+                        className={`relative z-10 flex h-11 w-11 items-center justify-center rounded-full border text-sm font-semibold shadow-sm ring-4 ring-slate-50 transition-colors ${
+                          isReached
+                            ? "border-emerald-600 bg-emerald-600 text-white"
+                            : "border-slate-200 bg-white text-slate-400"
                         }`}
-                    />
-                  )}
-                </div>
-              ))}
+                      >
+                        {isDone ? (
+                          <CheckCircle2 className="h-5 w-5" />
+                        ) : (
+                          <s.icon className="h-5 w-5" />
+                        )}
+                      </div>
+
+                      <span
+                        className={`mt-2 truncate text-xs font-medium sm:text-sm ${
+                          isCurrent ? "text-emerald-700" : isReached ? "text-slate-800" : "text-slate-500"
+                        }`}
+                      >
+                        {s.label}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
             <AnimatePresence mode="wait">
@@ -859,7 +1204,7 @@ const RegisterPage = () => {
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }}
-                className="rounded-2xl bg-white p-4 shadow-xl sm:p-6 lg:p-8"
+                className="rounded-xl bg-white p-4 shadow-xl sm:p-6 lg:p-8"
               >
                 {step === 0 && (
                   <div className="space-y-6">
@@ -867,7 +1212,7 @@ const RegisterPage = () => {
                       Organization Details
                     </h2>
 
-                    <div className="grid md:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                       <div>
                         <Label className="text-gray-700">Organization Name *</Label>
                         <Input
@@ -880,14 +1225,46 @@ const RegisterPage = () => {
                       </div>
 
                       <div>
-                        <Label className="text-gray-700">Registration Number *</Label>
+                        <Label className="text-gray-700">Hospital Registered ID *</Label>
                         <Input
-                          name="registrationNumber"
-                          value={formData.registrationNumber}
+                          name="hospitalRegisteredId"
+                          value={formData.hospitalRegisteredId}
                           onChange={handleChange}
-                          placeholder="REG-XXXXX"
+                          placeholder="Enter hospital registered ID"
                           className="mt-1"
                         />
+                      </div>
+
+                      <div>
+                        <Label className="text-gray-700">SPOC Name *</Label>
+                        <Input
+                          name="spocName"
+                          value={formData.spocName}
+                          onChange={handleChange}
+                          placeholder="Single point of contact"
+                          className="mt-1"
+                        />
+                      </div>
+
+                      <div>
+                        <Label className="text-gray-700">Hospital Category *</Label>
+                        <Select
+                          value={formData.hospitalCategory}
+                          onValueChange={(value) =>
+                            setFormData(prev => ({ ...prev, hospitalCategory: value }))
+                          }
+                        >
+                          <SelectTrigger className="mt-1">
+                            <SelectValue placeholder="Select hospital category" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {HOSPITAL_CATEGORIES.map((category) => (
+                              <SelectItem key={category} value={category}>
+                                {category}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </div>
 
                       <div>
@@ -979,19 +1356,49 @@ const RegisterPage = () => {
                           className="mt-1"
                         />
                       </div>
+
+                      <div className="md:col-span-2">
+                        <Label className="text-gray-700">Hospital Registration Certificate *</Label>
+                        <input
+                          type="file"
+                          id="hospitalRegistrationCertificate"
+                          className="hidden"
+                          accept=".pdf,application/pdf"
+                          onChange={(e) =>
+                            handleHospitalRegistrationCertificateUpload(e.target.files?.[0] || null)
+                          }
+                        />
+                        <label
+                          htmlFor="hospitalRegistrationCertificate"
+                          className="mt-1 flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-gray-300 px-3 text-sm text-gray-600 transition-colors hover:border-emerald-500 hover:text-emerald-700"
+                        >
+                          <Upload className="h-4 w-4" />
+                          <span className="truncate">
+                            {hospitalRegistrationCertificate
+                              ? getFileName(hospitalRegistrationCertificate)
+                              : "Upload PDF"}
+                          </span>
+                        </label>
+                        {hospitalRegistrationCertificate && (
+                          <p className="mt-1 flex items-center gap-1 text-xs text-emerald-600">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            PDF selected
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
 
                 {step === 1 && (
                   <div className="space-y-6">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <h2 className="text-2xl font-bold text-gray-900">
                         Team Members
                       </h2>
 
                       {members.length < 3 && (
-                        <Button variant="outline" size="sm" onClick={addMember}>
+                        <Button variant="outline" size="sm" onClick={addMember} className="w-full sm:w-auto">
                           <Plus className="h-4 w-4 mr-1" /> Add Member
                         </Button>
                       )}
@@ -1004,7 +1411,7 @@ const RegisterPage = () => {
                     {members.map((member, i) => (
                       <div
                         key={i}
-                        className="p-4 rounded-lg border border-gray-200 space-y-3"
+                        className="space-y-4 rounded-lg border border-gray-200 p-4 sm:p-5"
                       >
                         <div className="flex items-center justify-between">
                           <span className="text-sm font-medium text-gray-700">
@@ -1022,8 +1429,8 @@ const RegisterPage = () => {
                           )}
                         </div>
 
-                        <div className="grid md:grid-cols-3 gap-3">
-                          <div>
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-12">
+                          <div className="min-w-0 xl:col-span-3">
                             <Label className="text-gray-700">Full Name *</Label>
                             <Input
                               placeholder="Enter name"
@@ -1035,7 +1442,7 @@ const RegisterPage = () => {
                             />
                           </div>
 
-                          <div>
+                          <div className="min-w-0 xl:col-span-3">
                             <Label className="text-gray-700">Email *</Label>
                             <Input
                               type="email"
@@ -1044,11 +1451,32 @@ const RegisterPage = () => {
                               onChange={(e) =>
                                 handleMemberChange(i, "email", e.target.value)
                               }
+                              className={`mt-1 ${
+                                duplicateTeamEmail && normalizeEmail(member.email) === duplicateTeamEmail
+                                  ? "border-red-400 focus-visible:ring-red-400"
+                                  : ""
+                              }`}
+                            />
+                            {duplicateTeamEmail && normalizeEmail(member.email) === duplicateTeamEmail && (
+                              <p className="mt-1 text-xs font-medium text-red-600">
+                                Email already exists
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="min-w-0 xl:col-span-2">
+                            <Label className="text-gray-700">Employee ID *</Label>
+                            <Input
+                              placeholder="Enter employee ID"
+                              value={member.hospitalEmployeeId}
+                              onChange={(e) =>
+                                handleMemberChange(i, "hospitalEmployeeId", e.target.value)
+                              }
                               className="mt-1"
                             />
                           </div>
 
-                          <div>
+                          <div className="min-w-0 xl:col-span-2">
                             <Label className="text-gray-700">Role *</Label>
                             <Select
                               value={member.role}
@@ -1069,6 +1497,67 @@ const RegisterPage = () => {
                               </SelectContent>
                             </Select>
                           </div>
+
+                          {member.role === OTHER_ROLE_VALUE && (
+                            <div className="min-w-0 xl:col-span-2">
+                              <Label className="text-gray-700">Enter Role *</Label>
+                              <Input
+                                placeholder="Enter role"
+                                value={member.customRole}
+                                onChange={(e) =>
+                                  handleMemberChange(i, "customRole", e.target.value)
+                                }
+                                className="mt-1"
+                              />
+                            </div>
+                          )}
+
+                          <div className="min-w-0 xl:col-span-2">
+                            {(() => {
+                              const isDuplicateDocument =
+                                duplicateTeamDocument &&
+                                getEvidenceKey(member.evidence) === duplicateTeamDocument;
+
+                              return (
+                                <>
+                            <Label className="text-gray-700">Document *</Label>
+                                <input
+                                  type="file"
+                                  id={`memberEvidence-${i}`}
+                                  className="hidden"
+                                  accept=".pdf,application/pdf"
+                                  onChange={(e) =>
+                                    handleMemberDocumentUpload(i, e.target.files?.[0] || null)
+                                  }
+                                />
+                            <label
+                              htmlFor={`memberEvidence-${i}`}
+                              className={`mt-1 flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed px-3 text-sm transition-colors ${
+                                isDuplicateDocument
+                                  ? "border-red-400 text-red-600 hover:border-red-500"
+                                  : "border-gray-300 text-gray-600 hover:border-emerald-500 hover:text-emerald-700"
+                              }`}
+                            >
+                                  <Upload className="h-4 w-4" />
+                                  <span className="min-w-0 truncate">
+                                    {member.evidence ? getFileName(member.evidence) : "Upload PDF"}
+                                  </span>
+                                </label>
+                            {member.evidence && (
+                              <p className="mt-1 flex items-center gap-1 text-xs text-emerald-600">
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                Document uploaded
+                              </p>
+                            )}
+                            {isDuplicateDocument && (
+                              <p className="mt-1 text-xs font-medium text-red-600">
+                                Document already exists
+                              </p>
+                            )}
+                                </>
+                              );
+                            })()}
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -1077,100 +1566,30 @@ const RegisterPage = () => {
 
                 {step === 2 && (
                   <div className="space-y-6">
-                    <h2 className="text-2xl font-bold text-gray-900">
-                      Upload Documents
-                    </h2>
-
-                    <p className="text-sm text-gray-600">
-                      Please upload the required documents for verification.{" "}
-                      <span className="font-semibold text-amber-600">
-                        Only ZIP files are allowed (Max 10MB).
-                      </span>
-                    </p>
-
-                    {[
-                      {
-                        key: "registrationCert" as const,
-                        label: "Organization Registration Certificate",
-                        required: true
-                      },
-                      {
-                        key: "teamLeadId" as const,
-                        label: "Team's Document's Proof",
-                        required: true
-                      },
-                      {
-                        key: "nursingCouncilReg" as const,
-                        label: "Nursing Council Registration",
-                        required: false
-                      }
-                    ].map((doc) => (
-                      <div key={doc.key} className="relative">
-                        <input
-                          type="file"
-                          id={doc.key}
-                          className="hidden"
-                          accept=".zip"
-                          onChange={(e) =>
-                            handleFileUpload(doc.key, e.target.files?.[0] || null)
-                          }
-                        />
-
-                        <label
-                          htmlFor={doc.key}
-                        className="block cursor-pointer rounded-lg border-2 border-dashed border-gray-300 p-4 text-center transition-colors hover:border-emerald-500 sm:p-8"
-                        >
-                          <Upload className="h-8 w-8 mx-auto text-gray-400 mb-3" />
-
-                          <p className="font-medium text-gray-700">
-                            {doc.label} {doc.required && "*"}
-                          </p>
-
-                          <p className="text-sm text-gray-500 mt-1">
-                            Only ZIP files allowed (Max 10MB)
-                          </p>
-
-                          {documents[doc.key] && (
-                            <p className="text-sm text-emerald-600 mt-2 flex items-center justify-center gap-1">
-                              <CheckCircle2 className="h-4 w-4" />
-
-                              {typeof documents[doc.key] === "string"
-                                ? (documents[doc.key] as string).split("/").pop()
-                                : (documents[doc.key] as File).name}
-                            </p>
-                          )}
-                        </label>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {step === 3 && (
-                  <div className="space-y-6">
                     <h2 className="text-2xl font-bold text-gray-900">Payment</h2>
 
                     <div className="bg-emerald-50 rounded-lg p-6 space-y-3">
                       <div className="flex justify-between text-sm">
                         <span className="text-gray-600">Registration Fee</span>
-                        <span className="font-semibold text-gray-900">₹3,000</span>
+                        <span className="font-semibold text-gray-900">₹25,00</span>
                       </div>
 
                       <div className="flex justify-between text-sm">
                         <span className="text-gray-600">GST (18%)</span>
-                        <span className="font-semibold text-gray-900">₹540</span>
+                        <span className="font-semibold text-gray-900">₹450</span>
                       </div>
 
                       <div className="border-t border-emerald-200 pt-3 flex justify-between">
                         <span className="font-semibold text-gray-900">Total</span>
                         <span className="text-lg font-bold text-emerald-600">
-                          ₹3,540
+                          ₹2,950
                         </span>
                       </div>
                     </div>
                   </div>
                 )}
 
-                {step === 4 && (
+                {step === 3 && (
                   <div className="text-center py-8">
                     <div className="w-20 h-20 rounded-full bg-emerald-100 flex items-center justify-center mx-auto mb-6">
                       <CheckCircle2 className="h-10 w-10 text-emerald-600" />
@@ -1213,7 +1632,7 @@ const RegisterPage = () => {
                   </div>
                 )}
 
-                {step < 4 && (
+                {step < 3 && (
                   <div className="flex justify-between mt-8 pt-6 border-t border-gray-200">
                     <Button
                       variant="outline"
@@ -1235,7 +1654,7 @@ const RegisterPage = () => {
                         </>
                       ) : (
                         <>
-                          {step === 3 ? "Complete Registration" : "Next"}
+                          {step === 2 ? "Complete Registration" : "Next"}
                           <ArrowRight className="h-4 w-4 ml-2" />
                         </>
                       )}

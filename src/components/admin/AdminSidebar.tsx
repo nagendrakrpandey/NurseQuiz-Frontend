@@ -29,8 +29,21 @@ export const adminNavItems: AdminNavItem[] = [
   { icon: FileQuestion, label: "Quiz Management", id: "quiz", color: "indigo" },
   { icon: Calendar, label: "Candidate Evidence", id: "manage-exam", color: "rose" },
   { icon: Trophy, label: "Leaderboard", id: "leaderboard", color: "orange" },
-  { icon: Mail, label: "Communication", id: "communication", color: "cyan" },
+  // { icon: Mail, label: "Communication", id: "communication", color: "cyan" },
 ];
+
+const roleTwoNavOrder = ["overview", "leaderboard"];
+const roleTwoAllowedNavIds = new Set(roleTwoNavOrder);
+
+export const getAdminNavItemsForRole = (roleId?: number | string | null) =>
+  Number(roleId) === 2
+    ? roleTwoNavOrder
+        .map((id) => adminNavItems.find((item) => item.id === id))
+        .filter((item): item is AdminNavItem => Boolean(item))
+    : adminNavItems;
+
+export const isAdminNavItemAllowedForRole = (id: string, roleId?: number | string | null) =>
+  getAdminNavItemsForRole(roleId).some((item) => item.id === id);
 
 interface AdminSidebarProps {
   activeId: string;

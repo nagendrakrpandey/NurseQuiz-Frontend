@@ -38,6 +38,7 @@ import {
   getBatchCode,
   getBatchId,
   getCandidateId,
+  getCandidateUserId,
   normalizeBatch,
   normalizeCandidate,
   unwrapApiData,
@@ -51,7 +52,7 @@ type LeaderboardStatus = "not_started" | "in_progress" | "completed";
 interface LeaderboardRow {
   rank: number;
   candidateId: number | null;
-  candidateName: string;
+  organizationName: string;
   email: string;
   enrollmentNo: string;
   batchCode: string;
@@ -97,6 +98,115 @@ const readText = (record: Record<string, unknown>, aliases: string[]) => {
   return matchedEntry && matchedEntry[1] !== null && matchedEntry[1] !== undefined
     ? String(matchedEntry[1]).trim()
     : "";
+};
+
+interface OrganizationDirectory {
+  byEmail: Map<string, string>;
+  byEnrollmentNo: Map<string, string>;
+  byUserId: Map<string, string>;
+}
+
+const createOrganizationDirectory = (): OrganizationDirectory => ({
+  byEmail: new Map(),
+  byEnrollmentNo: new Map(),
+  byUserId: new Map(),
+});
+
+const normalizeLookupKey = (value: unknown) => String(value || "").trim().toLowerCase();
+
+const addLookupValue = (map: Map<string, string>, key: unknown, organizationName: string) => {
+  const normalizedKey = normalizeLookupKey(key);
+  if (normalizedKey && organizationName && !map.has(normalizedKey)) {
+    map.set(normalizedKey, organizationName);
+  }
+};
+
+const getNestedRecord = (record: Record<string, unknown>, key: string) =>
+  record[key] && typeof record[key] === "object" ? (record[key] as Record<string, unknown>) : null;
+
+const addOrganizationLookups = (
+  record: Record<string, unknown>,
+  directory: OrganizationDirectory,
+  organizationName: string
+) => {
+  addLookupValue(directory.byEmail, readText(record, ["email", "orgEmail", "organizationEmail", "userEmail", "contactEmail"]), organizationName);
+  addLookupValue(
+    directory.byEnrollmentNo,
+    readText(record, ["enrollmentNo", "enrollment_no", "hospitalRegisteredId", "hospital_registered_id", "registrationNumber", "registration_no", "organizationId"]),
+    organizationName
+  );
+
+  const directUserId = readNumber(record, [
+    "userId",
+    "user_id",
+    "orgUserId",
+    "org_user_id",
+    "organizationUserId",
+    "organization_user_id",
+    "registrationUserId",
+    "registration_user_id",
+  ]);
+  if (directUserId) addLookupValue(directory.byUserId, directUserId, organizationName);
+
+  ["user", "authUser", "organizationUser", "registrationUser"].forEach((key) => {
+    const nestedRecord = getNestedRecord(record, key);
+    if (!nestedRecord) return;
+
+    addLookupValue(directory.byEmail, readText(nestedRecord, ["email", "userEmail", "contactEmail"]), organizationName);
+    const nestedUserId = readNumber(nestedRecord, ["id", "userId", "user_id"]);
+    if (nestedUserId) addLookupValue(directory.byUserId, nestedUserId, organizationName);
+  });
+};
+
+const collectOrganizationDirectory = (
+  value: unknown,
+  directory: OrganizationDirectory,
+  inheritedOrganizationName = ""
+) => {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectOrganizationDirectory(item, directory, inheritedOrganizationName));
+    return;
+  }
+
+  if (!value || typeof value !== "object") return;
+
+  const record = value as Record<string, unknown>;
+  const organizationName =
+    readText(record, [
+      "organizationName",
+      "organization_name",
+      "orgName",
+      "org_name",
+      "institutionName",
+      "instituteName",
+      "collegeName",
+      "hospitalName",
+    ]) || inheritedOrganizationName;
+
+  if (organizationName) addOrganizationLookups(record, directory, organizationName);
+
+  Object.values(record).forEach((item) => {
+    if (item && typeof item === "object") {
+      collectOrganizationDirectory(item, directory, organizationName);
+    }
+  });
+};
+
+const getOrganizationNameForCandidate = (
+  candidate: CandidateListRow,
+  directory: OrganizationDirectory
+) => {
+  const userId = getCandidateUserId(candidate);
+  const email = candidate.email;
+  const enrollmentNo = candidate.enrollment_no || candidate.enrollmentNo;
+
+  return (
+    (userId ? directory.byUserId.get(normalizeLookupKey(userId)) : "") ||
+    directory.byEmail.get(normalizeLookupKey(email)) ||
+    directory.byEnrollmentNo.get(normalizeLookupKey(enrollmentNo)) ||
+    candidate.organizationName ||
+    ""
+  );
 };
 
 const normalizeAnswer = (value: string) =>
@@ -154,6 +264,62 @@ const getTotalMarks = (row: Record<string, unknown>) => {
   return marks || (correct ? 1 : 0);
 };
 
+const readCandidateScore = (candidate: CandidateListRow) => {
+  const record = candidate as unknown as Record<string, unknown>;
+  return readNumber(record, [
+    "score",
+    "finalScore",
+    "totalScore",
+    "resultScore",
+    "examScore",
+    "obtainedScore",
+    "obtainedMarks",
+    "obtMarks",
+    "marksObtained",
+  ]);
+};
+
+const readCandidateTotalMarks = (candidate: CandidateListRow) => {
+  const record = candidate as unknown as Record<string, unknown>;
+  return readNumber(record, [
+    "totalMarks",
+    "maxMarks",
+    "fullMarks",
+    "questionCount",
+    "totalQuestions",
+    "questionsCount",
+  ]);
+};
+
+const readCandidatePercentage = (candidate: CandidateListRow) => {
+  const record = candidate as unknown as Record<string, unknown>;
+  const percentage = readNumber(record, [
+    "percentage",
+    "percent",
+    "scorePercentage",
+    "resultPercentage",
+  ]);
+
+  if (percentage === null) return null;
+  return percentage <= 1 ? percentage * 100 : percentage;
+};
+
+const getResponseSummaryScore = (responses: Record<string, unknown>[]) => {
+  const summaryScores = responses
+    .map((row) =>
+      readNumber(row, [
+        "finalScore",
+        "totalScore",
+        "resultScore",
+        "examScore",
+        "obtainedScore",
+      ])
+    )
+    .filter((score): score is number => score !== null);
+
+  return summaryScores.length ? Math.max(...summaryScores) : null;
+};
+
 const getTotalTimeSeconds = (responses: Record<string, unknown>[]) => {
   const totalTime = Math.max(
     0,
@@ -208,9 +374,17 @@ const buildLeaderboardRow = (
     isAttemptedAnswer(readText(row, ["ansId", "answerId", "selectedOption", "responseId"]))
   ).length;
   const totalQuestions = getQuestionCount(responses);
-  const score = responses.reduce((sum, row) => sum + getObtainedMarks(row), 0);
-  const totalMarks = responses.reduce((sum, row) => sum + getTotalMarks(row), 0) || totalQuestions;
-  const percentage = totalMarks > 0 ? (score / totalMarks) * 100 : 0;
+  const responseScore = responses.reduce((sum, row) => sum + getObtainedMarks(row), 0);
+  const responseSummaryScore = getResponseSummaryScore(responses);
+  const candidateScore = readCandidateScore(candidate);
+  const score =
+    responseSummaryScore ??
+    (responseScore > 0 || candidateScore === null ? responseScore : candidateScore);
+  const responseTotalMarks = responses.reduce((sum, row) => sum + getTotalMarks(row), 0) || totalQuestions;
+  const candidateTotalMarks = readCandidateTotalMarks(candidate);
+  const totalMarks = responseTotalMarks || candidateTotalMarks || totalQuestions;
+  const candidatePercentage = readCandidatePercentage(candidate);
+  const percentage = candidatePercentage ?? (totalMarks > 0 ? (score / totalMarks) * 100 : 0);
   const tabSwitchCount = Math.max(
     0,
     ...responses.map((row) => readNumber(row, ["tabSwitchCount", "tab_switch_count"]) || 0)
@@ -221,7 +395,7 @@ const buildLeaderboardRow = (
 
   return {
     candidateId,
-    candidateName: candidate.name || (candidateId ? `Candidate #${candidateId}` : "Candidate"),
+    organizationName: candidate.organizationName || candidate.name || (candidateId ? `Organization #${candidateId}` : "Organization"),
     email: candidate.email || "--",
     enrollmentNo: candidate.enrollment_no || candidate.enrollmentNo || "--",
     batchCode: candidate.batchCode || getBatchCode(batch) || "--",
@@ -240,6 +414,7 @@ const buildLeaderboardRow = (
 const rankRows = (rows: Array<Omit<LeaderboardRow, "rank">>): LeaderboardRow[] =>
   [...rows]
     .sort((first, second) => {
+      if (second.percentage !== first.percentage) return second.percentage - first.percentage;
       if (second.score !== first.score) return second.score - first.score;
       if (second.attemptedQuestions !== first.attemptedQuestions) {
         return second.attemptedQuestions - first.attemptedQuestions;
@@ -247,7 +422,7 @@ const rankRows = (rows: Array<Omit<LeaderboardRow, "rank">>): LeaderboardRow[] =
       if (first.timeSeconds !== second.timeSeconds) {
         return (first.timeSeconds || Number.MAX_SAFE_INTEGER) - (second.timeSeconds || Number.MAX_SAFE_INTEGER);
       }
-      return first.candidateName.localeCompare(second.candidateName);
+      return first.organizationName.localeCompare(second.organizationName);
     })
     .map((row, index) => ({ ...row, rank: index + 1 }));
 
@@ -334,6 +509,7 @@ const MetricTile = ({
 
 const LiveLeaderboard = () => {
   const requestIdRef = useRef(0);
+  const organizationDirectoryRef = useRef<OrganizationDirectory | null>(null);
   const [level, setLevel] = useState<LevelOption>(
     (localStorage.getItem("level") as LevelOption) || "district"
   );
@@ -365,6 +541,24 @@ const LiveLeaderboard = () => {
     }
   }, []);
 
+  const fetchOrganizationDirectory = useCallback(async () => {
+    if (organizationDirectoryRef.current) return organizationDirectoryRef.current;
+
+    const directory = createOrganizationDirectory();
+    let loaded = false;
+
+    try {
+      const payload = await fetchJson(`${BASE_URL1}/register/get/all`);
+      collectOrganizationDirectory(unwrapApiData(payload), directory);
+      loaded = true;
+    } catch (fetchError) {
+      console.warn("Unable to load organization names for leaderboard", fetchError);
+    }
+
+    if (loaded) organizationDirectoryRef.current = directory;
+    return directory;
+  }, []);
+
   const loadLeaderboard = useCallback(
     async (availableBatches: BatchOption[], batchId: string, silent = false) => {
       const batchesToLoad =
@@ -387,22 +581,31 @@ const LiveLeaderboard = () => {
       }
 
       try {
-        const batchCandidates = await Promise.all(
-          batchesToLoad.map(async (batch) => {
-            const batchIdValue = getBatchId(batch);
-            if (!batchIdValue) return [] as Array<{ batch: BatchOption; candidate: CandidateListRow }>;
+        const [organizationDirectory, batchCandidates] = await Promise.all([
+          fetchOrganizationDirectory(),
+          Promise.all(
+            batchesToLoad.map(async (batch) => {
+              const batchIdValue = getBatchId(batch);
+              if (!batchIdValue) return [] as Array<{ batch: BatchOption; candidate: CandidateListRow }>;
 
-            const payload = await fetchJson(`${BASE_URL1}/candidates?batchId=${encodeURIComponent(batchIdValue)}`);
-            const data = unwrapApiData(payload);
-            const candidates = Array.isArray(data)
-              ? data.map((item) => normalizeCandidate(item as Record<string, unknown>))
-              : [];
+              const payload = await fetchJson(`${BASE_URL1}/candidates?batchId=${encodeURIComponent(batchIdValue)}`);
+              const data = unwrapApiData(payload);
+              const candidates = Array.isArray(data)
+                ? data.map((item) => normalizeCandidate(item as Record<string, unknown>))
+                : [];
 
-            return candidates.map((candidate) => ({ batch, candidate }));
-          })
-        );
+              return candidates.map((candidate) => ({ batch, candidate }));
+            })
+          ),
+        ]);
 
-        const candidateEntries = batchCandidates.flat();
+        const candidateEntries = batchCandidates.flat().map(({ batch, candidate }) => ({
+          batch,
+          candidate: {
+            ...candidate,
+            organizationName: getOrganizationNameForCandidate(candidate, organizationDirectory) || candidate.organizationName,
+          },
+        }));
         const leaderboardRows = await Promise.all(
           candidateEntries.map(async ({ batch, candidate }) => {
             const responses = await fetchCandidateResponses(getCandidateId(candidate));
@@ -425,7 +628,7 @@ const LiveLeaderboard = () => {
         }
       }
     },
-    [fetchCandidateResponses]
+    [fetchCandidateResponses, fetchOrganizationDirectory]
   );
 
   const loadBatches = useCallback(
@@ -495,7 +698,7 @@ const LiveLeaderboard = () => {
     if (!query) return rows;
 
     return rows.filter((row) =>
-      [row.candidateName, row.email, row.enrollmentNo, row.batchCode]
+      [row.organizationName, row.email, row.enrollmentNo, row.batchCode]
         .join(" ")
         .toLowerCase()
         .includes(query)
@@ -605,7 +808,7 @@ const LiveLeaderboard = () => {
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <MetricTile
           icon={<Users className="h-5 w-5 text-blue-700" />}
-          label="Candidates"
+          label="Organizations"
           value={rows.length}
           tone="bg-blue-100"
         />
@@ -636,7 +839,7 @@ const LiveLeaderboard = () => {
               {selectedBatch ? getBatchCode(selectedBatch) || `Batch ${selectedBatchId}` : "All batches"} standings
             </h3>
             <p className="mt-1 text-xs text-slate-500">
-              {filteredRows.length} candidate{filteredRows.length === 1 ? "" : "s"} shown
+              {filteredRows.length} organization{filteredRows.length === 1 ? "" : "s"} shown
               {refreshing ? " - refreshing" : ""}
             </p>
           </div>
@@ -645,7 +848,7 @@ const LiveLeaderboard = () => {
             <Input
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder="Search candidate..."
+              placeholder="Search organization..."
               className="h-10 rounded-lg border-slate-200 bg-white pl-9"
             />
           </div>
@@ -669,7 +872,7 @@ const LiveLeaderboard = () => {
               <TableHeader>
                 <TableRow className="border-b border-slate-200 bg-white">
                   <TableHead className="h-11 w-[84px] px-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Rank</TableHead>
-                  <TableHead className="h-11 min-w-[240px] text-xs font-semibold uppercase tracking-wide text-slate-500">Candidate</TableHead>
+                  <TableHead className="h-11 min-w-[240px] text-xs font-semibold uppercase tracking-wide text-slate-500">Organization Name</TableHead>
                   <TableHead className="h-11 text-xs font-semibold uppercase tracking-wide text-slate-500">Batch</TableHead>
                   <TableHead className="h-11 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Score</TableHead>
                   <TableHead className="h-11 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Attempted</TableHead>
@@ -690,7 +893,7 @@ const LiveLeaderboard = () => {
                     </TableCell>
                     <TableCell className="py-4">
                       <div>
-                        <p className="font-semibold leading-5 text-slate-950">{row.candidateName}</p>
+                        <p className="font-semibold leading-5 text-slate-950">{row.organizationName}</p>
                         <p className="text-xs text-slate-500">{row.email}</p>
                         <p className="mt-0.5 text-[11px] font-mono text-slate-400">{row.enrollmentNo}</p>
                       </div>
@@ -739,7 +942,7 @@ const LiveLeaderboard = () => {
             <EmptyState
               icon={Trophy}
               title="No leaderboard data"
-              description="No enrolled candidates or saved responses were found for the selected filters."
+              description="No enrolled organizations or saved responses were found for the selected filters."
             />
           </div>
         )}

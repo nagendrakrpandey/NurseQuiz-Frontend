@@ -13,10 +13,14 @@ import { BASE_URL } from "@/Service/api";
 
 // Types based on backend response
 interface OrganizationData {
+  [key: string]: any;
   id: number;
   userId: number;
   organizationName: string;
-  registrationNumber: string;
+  registrationNumber?: string;
+  hospitalRegisteredId?: string;
+  spocName?: string;
+  hospitalCategory?: string;
   pincode: string;
   state: string;
   district: string;
@@ -28,17 +32,22 @@ interface OrganizationData {
 }
 
 interface Member {
+  [key: string]: any;
   id: number;
   name: string;
   email: string;
+  hospitalEmployeeId?: string;
+  employeeId?: string;
   role: string;
   organizationId: number;
   userId: number;
 }
 
 interface Document {
+  [key: string]: any;
   id: number;
   registrationCertPath: string;
+  hospitalRegistrationCertificatePath?: string;
   teamLeadIdPath: string;
   nursingCouncilRegPath: string;
   userId: number;
@@ -66,6 +75,90 @@ interface DialogState {
   message: string;
   type: "info" | "error" | "success" | "warning";
 }
+
+const getHospitalRegisteredId = (org?: OrganizationData | null) =>
+  org?.hospitalRegisteredId || org?.registrationNumber || "N/A";
+
+const getTeamMemberEmployeeId = (member: Member) =>
+  member.hospitalEmployeeId || member.employeeId || "N/A";
+
+const asRecord = (value: unknown): Record<string, any> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+
+const unwrapArray = (payload: unknown) => {
+  if (Array.isArray(payload)) return payload;
+  const record = asRecord(payload);
+  const match = [record.data, record.result, record.items, record.members, record.teamMembers, record.team, record.rows]
+    .find(Array.isArray);
+  return Array.isArray(match) ? match : [];
+};
+
+const unwrapDocument = (payload: unknown): Document | null => {
+  if (Array.isArray(payload)) {
+    const firstDocument = payload.find((item) => Object.keys(asRecord(item)).length);
+    return firstDocument ? asRecord(firstDocument) as Document : null;
+  }
+
+  const record = asRecord(payload);
+  const document = asRecord(record.data || record.result || record.document || record.documents || payload);
+  return Object.keys(document).length ? document as Document : null;
+};
+
+const readResponsePayload = async (response: Response) => {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { success: false, message: text };
+  }
+};
+
+const getCleanToken = () =>
+  String(localStorage.getItem("token") || localStorage.getItem("authToken") || "").replace(/^Bearer\s+/i, "").trim();
+
+const getOrganizationUserId = (org: OrganizationData) =>
+  Number(org.userId || asRecord(org.user).id || 0);
+
+const normalizeMember = (value: unknown): Member => {
+  const record = asRecord(value);
+  return {
+    ...record,
+    id: Number(record.id || 0),
+    name: String(record.name || record.fullName || record.memberName || ""),
+    email: String(record.email || record.memberEmail || record.userEmail || ""),
+    hospitalEmployeeId: String(record.hospitalEmployeeId || record.hospital_employee_id || record.employeeId || record.employee_id || ""),
+    role: String(record.role || record.department || record.departmentName || ""),
+    organizationId: Number(record.organizationId || record.registrationId || 0),
+    userId: Number(record.userId || asRecord(record.user).id || 0),
+  };
+};
+
+const getEmbeddedTeamMembers = (org: OrganizationData) =>
+  unwrapArray(org.teamMembers || org.members || org.team || org.teamMemberList).map(normalizeMember);
+
+const getEmbeddedDocuments = (org: OrganizationData) =>
+  unwrapDocument(org.documents || org.document || org.uploadedDocuments || org.registrationDocument);
+
+const isMatchingMember = (member: Member, userId: number, organizationId: number) => {
+  const memberUserId = Number(member.userId || asRecord(member.user).id || 0);
+  const memberOrgId = Number(member.organizationId || member.registrationId || 0);
+  return (userId > 0 && memberUserId === userId) || (organizationId > 0 && memberOrgId === organizationId);
+};
+
+const isMatchingDocument = (document: Document, userId: number, organizationId: number) => {
+  const documentUserId = Number(document.userId || asRecord(document.user).id || 0);
+  const documentOrgId = Number(document.organizationId || document.registrationId || 0);
+  return (userId > 0 && documentUserId === userId) || (organizationId > 0 && documentOrgId === organizationId);
+};
+
+const getFileUrl = (path: string) => {
+  if (!path) return "";
+  if (path.startsWith("http")) return path;
+  if (path.startsWith("/")) return `${BASE_URL}${path}`;
+  return `${BASE_URL}/uploads/${path}`;
+};
 
 // Custom Dialog Component
 const CustomDialog = ({ isOpen, onClose, title, message, type = "info" }: DialogState & { onClose: () => void }) => {
@@ -240,26 +333,44 @@ const Status = () => {
   };
 
   // Fetch team members by userId
-  const fetchTeamMembers = async (userId: number) => {
-    const token = localStorage.getItem("token");
+  const fetchTeamMembers = async (org: OrganizationData) => {
+    const token = getCleanToken();
+    const userId = getOrganizationUserId(org);
+    const endpoints = [
+      { url: `${BASE_URL}/api/register/get/team/public/${userId}`, auth: false },
+      { url: `${BASE_URL}/api/register/get/team/${userId}`, auth: true },
+      { url: `${BASE_URL}/api/register/get/team?userId=${encodeURIComponent(String(userId))}`, auth: true },
+    ];
     
     try {
-      const response = await fetch(`${BASE_URL}/api/register/get/team/${userId}`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      
-      const data = await response.json();
-      console.log("Team members:", data);
-      
-      if (response.ok && data.success && data.data) {
-        setMembers(data.data);
-      } else {
-        setMembers([]);
+      for (const endpoint of endpoints) {
+        const response = await fetch(endpoint.url, {
+          method: "GET",
+          headers: endpoint.auth
+            ? {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              }
+            : {
+                "Content-Type": "application/json",
+              },
+        });
+        const data = await readResponsePayload(response);
+
+        if (!response.ok) continue;
+
+        const rows = unwrapArray(data).map(normalizeMember);
+        const scopedRows = rows.filter((member) => isMatchingMember(member, userId, org.id));
+        const hasScopeFields = rows.some((member) => Number(member.userId || 0) > 0 || Number(member.organizationId || 0) > 0);
+        const finalRows = scopedRows.length ? scopedRows : (!hasScopeFields ? rows : []);
+
+        if (finalRows.length) {
+          setMembers(finalRows);
+          return;
+        }
       }
+
+      setMembers(getEmbeddedTeamMembers(org));
     } catch (err) {
       console.error("Error fetching team:", err);
       setMembers([]);
@@ -267,26 +378,38 @@ const Status = () => {
   };
 
   // Fetch documents by userId
-  const fetchDocuments = async (userId: number) => {
-    const token = localStorage.getItem("token");
+  const fetchDocuments = async (org: OrganizationData) => {
+    const token = getCleanToken();
+    const userId = getOrganizationUserId(org);
+    const endpoints = [
+      `${BASE_URL}/api/register/get/documents/${userId}`,
+      `${BASE_URL}/api/register/get/documents?userId=${encodeURIComponent(String(userId))}`,
+    ];
     
     try {
-      const response = await fetch(`${BASE_URL}/api/register/get/documents/${userId}`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      
-      const data = await response.json();
-      console.log("Documents:", data);
-      
-      if (response.ok && data.success && data.data) {
-        setDocuments(data.data);
-      } else {
-        setDocuments(null);
+      for (const endpoint of endpoints) {
+        const response = await fetch(endpoint, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        const data = await readResponsePayload(response);
+
+        if (!response.ok) continue;
+
+        const doc = unwrapDocument(data);
+        const hasScopeFields = Boolean(doc && (Number(doc.userId || 0) > 0 || Number(doc.organizationId || 0) > 0));
+        const canUseDocument = Boolean(doc && (isMatchingDocument(doc, userId, org.id) || !hasScopeFields));
+
+        if (doc && canUseDocument) {
+          setDocuments(doc);
+          return;
+        }
       }
+
+      setDocuments(getEmbeddedDocuments(org));
     } catch (err) {
       console.error("Error fetching documents:", err);
       setDocuments(null);
@@ -308,9 +431,9 @@ const Status = () => {
   const handleSelectOrganization = async (org: OrganizationData) => {
     setSelectedOrg(org);
     await Promise.all([
-      fetchTeamMembers(org.userId),
-      fetchDocuments(org.userId),
-      fetchPaymentDetails(org.userId)
+      fetchTeamMembers(org),
+      fetchDocuments(org),
+      fetchPaymentDetails(getOrganizationUserId(org))
     ]);
   };
 
@@ -330,7 +453,7 @@ const Status = () => {
     if (searchTerm) {
       filtered = filtered.filter(org =>
         org.organizationName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        org.registrationNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        getHospitalRegisteredId(org).toLowerCase().includes(searchTerm.toLowerCase()) ||
         org.orgEmail.toLowerCase().includes(searchTerm.toLowerCase())
       );
     }
@@ -608,7 +731,7 @@ const Status = () => {
                         <div className="mb-2 flex items-start justify-between gap-3">
                             <div className="min-w-0 flex-1">
                               <h3 className="font-semibold text-gray-900">{org.organizationName}</h3>
-                              <p className="text-sm text-gray-500">{org.registrationNumber}</p>
+                              <p className="text-sm text-gray-500">{getHospitalRegisteredId(org)}</p>
                             </div>
                             <StatusBadge status={org.status} />
                           </div>
@@ -644,7 +767,9 @@ const Status = () => {
                     <CardContent className="pt-6">
                       <div className="grid md:grid-cols-2 gap-y-4 gap-x-8 text-sm">
                         <DetailRow label="Name" value={selectedOrg.organizationName} />
-                        <DetailRow label="Reg. Number" value={selectedOrg.registrationNumber} />
+                        <DetailRow label="Hospital Registered ID" value={getHospitalRegisteredId(selectedOrg)} />
+                        <DetailRow label="SPOC Name" value={selectedOrg.spocName || "N/A"} />
+                        <DetailRow label="Hospital Category" value={selectedOrg.hospitalCategory || "N/A"} />
                         <DetailRow label="Email" value={selectedOrg.orgEmail} />
                         <DetailRow label="Phone" value={selectedOrg.orgPhone} />
                         <DetailRow label="Location" value={`${selectedOrg.district}, ${selectedOrg.state} (${selectedOrg.pincode})`} />
@@ -672,6 +797,7 @@ const Status = () => {
                               <tr className="text-left text-gray-500 border-b border-slate-200">
                                 <th className="pb-2">Member Name</th>
                                 <th className="pb-2">Email</th>
+                                <th className="pb-2">Employee ID</th>
                                 <th className="pb-2">Role</th>
                               </tr>
                             </thead>
@@ -680,6 +806,7 @@ const Status = () => {
                                 <tr key={member.id || index} className="border-b border-slate-100 last:border-0">
                                   <td className="py-3 font-medium">{member.name}</td>
                                   <td className="py-3 text-gray-600">{member.email}</td>
+                                  <td className="py-3 font-mono text-xs text-gray-600">{getTeamMemberEmployeeId(member)}</td>
                                   <td className="py-3">
                                     <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs capitalize">
                                       {member.role}
@@ -706,10 +833,10 @@ const Status = () => {
                       {documents ? (
                         <ul className="space-y-3">
                           <li className="flex items-center justify-between p-3 bg-white rounded-lg border">
-                            <span className="text-gray-600">Registration Certificate</span>
-                            {documents.registrationCertPath ? (
+                            <span className="text-gray-600">Hospital Registration Certificate</span>
+                            {(documents.hospitalRegistrationCertificatePath || documents.registrationCertPath) ? (
                               <a 
-                                href={`${BASE_URL}${documents.registrationCertPath}`} 
+                                href={getFileUrl(documents.hospitalRegistrationCertificatePath || documents.registrationCertPath)} 
                                 target="_blank" 
                                 rel="noopener noreferrer"
                                 className="text-emerald-600 hover:text-emerald-700 flex items-center gap-1"
@@ -724,7 +851,7 @@ const Status = () => {
                             <span className="text-gray-600">Team Lead ID Proof</span>
                             {documents.teamLeadIdPath ? (
                               <a 
-                                href={`${BASE_URL}${documents.teamLeadIdPath}`} 
+                                href={getFileUrl(documents.teamLeadIdPath)} 
                                 target="_blank" 
                                 rel="noopener noreferrer"
                                 className="text-emerald-600 hover:text-emerald-700 flex items-center gap-1"
@@ -739,7 +866,7 @@ const Status = () => {
                             <span className="text-gray-600">Nursing Council Registration</span>
                             {documents.nursingCouncilRegPath ? (
                               <a 
-                                href={`${BASE_URL}${documents.nursingCouncilRegPath}`} 
+                                href={getFileUrl(documents.nursingCouncilRegPath)} 
                                 target="_blank" 
                                 rel="noopener noreferrer"
                                 className="text-emerald-600 hover:text-emerald-700 flex items-center gap-1"
@@ -770,7 +897,14 @@ const Status = () => {
                         <div className="space-y-3">
                           <div className="flex justify-between items-center p-3 bg-emerald-50 rounded-lg">
                             <span className="text-gray-600">Amount Paid</span>
-                            <span className="font-bold text-emerald-700 text-xl">₹{paymentDetails.amount}</span>
+                            <span className="font-bold text-emerald-700 text-xl">
+                              {new Intl.NumberFormat("en-IN", {
+                                style: "currency",
+                                currency: "INR",
+                                minimumFractionDigits: 0,
+                                maximumFractionDigits: 0,
+                              }).format(paymentDetails.amount)}
+                            </span>
                           </div>
                           <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
                             <span className="text-gray-600">Payment Status</span>

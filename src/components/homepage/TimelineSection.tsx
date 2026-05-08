@@ -1,55 +1,55 @@
 import { motion } from "framer-motion";
-import { Calendar, CheckCircle2, Clock } from "lucide-react";
+import { CalendarDays, CheckCircle2, ClipboardList, Flag, Medal, Timer, Trophy } from "lucide-react";
 
 const dates = [
-  { date: "Apr 1 – Apr 30", title: "Registration Open", status: "active", description: "Organizations register and submit team details" },
-  { date: "May 5 – May 10", title: "Verification & Approval", status: "upcoming", description: "Document verification and team approval" },
-  { date: "May 15 – May 20", title: "District Level Quiz", status: "upcoming", description: "Online quiz for all registered teams" },
-  { date: "Jun 1 – Jun 5", title: "State Level Quiz", status: "upcoming", description: "Top performers compete at state level" },
-  { date: "Jun 20", title: "National Finals", status: "upcoming", description: "Grand finale with top teams from all states" },
-  { date: "Jun 25", title: "Awards & Certificates", status: "upcoming", description: "Winner announcements and certificate distribution" },
+  { date: "Apr 1 - Apr 30", title: "Registration", description: "Hospitals submit organization and team details.", icon: ClipboardList, status: "active" },
+  { date: "May 5 - May 10", title: "Verification", description: "Admin review, document checks, and approvals.", icon: CheckCircle2, status: "active" },
+  { date: "May 15 - May 20", title: "District Quiz", description: "First online assessment round for approved teams.", icon: Timer, status: "upcoming" },
+  { date: "Jun 1 - Jun 5", title: "State Quiz", description: "Top qualifying teams compete at state level.", icon: Trophy, status: "upcoming" },
+  { date: "Jun 20", title: "National Final", description: "Final round for the leading state performers.", icon: Flag, status: "upcoming" },
+  { date: "Jun 25", title: "Awards", description: "Certificates, rankings, and recognition published.", icon: Medal, status: "upcoming" },
 ];
 
 const TimelineSection = () => (
-  <section className="py-20 bg-muted/50" id="dates">
-    <div className="container">
+  <section className="bg-slate-50 py-16 sm:py-20 lg:py-24" id="dates">
+    <div className="container px-4 sm:px-6">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         whileInView={{ opacity: 1, y: 0 }}
         viewport={{ once: true }}
-        className="text-center max-w-2xl mx-auto mb-16"
+        className="mx-auto max-w-2xl text-center"
       >
-        <h2 className="text-3xl md:text-4xl font-heading font-bold text-foreground mb-4">Important Dates</h2>
-        <p className="text-muted-foreground text-lg">Stay updated with the competition timeline</p>
+        <p className="text-sm font-bold uppercase tracking-[0.2em] text-emerald-700">Competition Timeline</p>
+        <h2 className="mt-3 text-3xl font-black tracking-normal text-slate-950 sm:text-4xl">Important Dates</h2>
+        <p className="mt-4 text-base leading-7 text-slate-600">
+          Keep every team aligned from registration through the national finals.
+        </p>
       </motion.div>
-      <div className="max-w-3xl mx-auto">
-        {dates.map((item, i) => (
+
+      <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {dates.map((item, index) => (
           <motion.div
             key={item.title}
-            initial={{ opacity: 0, x: -20 }}
-            whileInView={{ opacity: 1, x: 0 }}
+            initial={{ opacity: 0, y: 18 }}
+            whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
-            transition={{ delay: i * 0.1 }}
-            className="flex gap-4 mb-6 last:mb-0"
+            transition={{ delay: index * 0.05 }}
+            className="group rounded-lg border border-slate-200 bg-white p-5 shadow-sm transition-all hover:-translate-y-1 hover:border-emerald-200 hover:shadow-md"
           >
-            <div className="flex flex-col items-center">
-              <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${item.status === "active" ? "bg-primary" : "bg-muted"}`}>
-                {item.status === "active" ? (
-                  <CheckCircle2 className="h-5 w-5 text-primary-foreground" />
-                ) : (
-                  <Clock className="h-5 w-5 text-muted-foreground" />
-                )}
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 group-hover:bg-emerald-600 group-hover:text-white">
+                <item.icon className="h-5 w-5" />
               </div>
-              {i < dates.length - 1 && <div className="w-0.5 flex-1 bg-border mt-2" />}
+              <span className={`rounded-full px-3 py-1 text-xs font-bold ${item.status === "active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                {item.status === "active" ? "Open" : "Upcoming"}
+              </span>
             </div>
-            <div className="bg-card rounded-lg p-4 card-shadow flex-1 mb-2">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-                <Calendar className="h-3 w-3" />
-                {item.date}
-              </div>
-              <h3 className="font-heading font-semibold text-card-foreground">{item.title}</h3>
-              <p className="text-sm text-muted-foreground mt-1">{item.description}</p>
+            <div className="mt-5 flex items-center gap-2 text-sm font-semibold text-slate-500">
+              <CalendarDays className="h-4 w-4 text-emerald-600" />
+              {item.date}
             </div>
+            <h3 className="mt-2 text-lg font-bold text-slate-950">{item.title}</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">{item.description}</p>
           </motion.div>
         ))}
       </div>

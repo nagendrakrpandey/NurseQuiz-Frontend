@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { AlertCircle, CalendarDays, CheckCircle2, Play, RefreshCw, Trophy, XCircle } from "lucide-react";
+import { AlertCircle, CalendarDays, CheckCircle2, Play, RefreshCw, Trophy } from "lucide-react";
 import UserDashboardShell from "@/components/user/UserDashboardShell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,12 +12,9 @@ import {
   formatDashboardDate,
   formatDashboardLabel,
   getActiveLevelIndex,
-  getDashboardEligibility,
   getDashboardLevels,
-  getDashboardScorePercentLabel,
   getLevelDate,
   getProgressPercentage,
-  isDashboardQuizCompleted,
 } from "@/lib/userDashboard";
 
 const CompetitionPage = () => {
@@ -40,14 +37,6 @@ const CompetitionPage = () => {
   const activeLevel = getActiveLevelIndex(dashboardData);
   const progress = getProgressPercentage(dashboardData);
   const quizAvailable = canStartDashboardQuiz(dashboardData);
-  const nextRoundEligibility = getDashboardEligibility(dashboardData);
-  const nextRoundMessage =
-    isDashboardQuizCompleted(dashboardData) && nextRoundEligibility !== null
-      ? nextRoundEligibility
-        ? "Congratulations, you are eligible for the next round."
-        : "Sorry, you are not eligible for the next round."
-      : "";
-  const scorePercentLabel = getDashboardScorePercentLabel(dashboardData);
 
   return (
     <UserDashboardShell
@@ -93,26 +82,6 @@ const CompetitionPage = () => {
           <CardContent className="space-y-5">
             <Progress value={progress} className="h-2" />
 
-            {nextRoundMessage && (
-              <div
-                className={`flex items-start gap-3 rounded-lg p-4 text-sm ${
-                  nextRoundEligibility
-                    ? "bg-success/10 text-success"
-                    : "bg-warning/10 text-warning"
-                }`}
-              >
-                {nextRoundEligibility ? (
-                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-                ) : (
-                  <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                )}
-                <span className="font-medium">{nextRoundMessage}</span>
-                {scorePercentLabel && (
-                  <span className="ml-auto shrink-0 font-semibold">{scorePercentLabel}</span>
-                )}
-              </div>
-            )}
-
             {levels.length > 0 ? (
               <div className="grid gap-3 md:grid-cols-3">
                 {levels.map((level, index) => {
@@ -154,11 +123,6 @@ const CompetitionPage = () => {
               </div>
             )}
 
-            {dashboardData?.nextExamDate && (
-              <div className="rounded-lg bg-accent p-4 text-sm text-accent-foreground">
-                Next exam: {formatDashboardDate(dashboardData.nextExamDate)}
-              </div>
-            )}
           </CardContent>
         </Card>
       </div>

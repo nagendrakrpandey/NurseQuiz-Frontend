@@ -2336,11 +2336,22 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
     </motion.div>
   );
 
-  const QuestionBankCard = ({ bank, onEdit, onDelete, onViewQuestions, onSelect }: any) => (
+  const QuestionBankCard = ({
+    bank,
+    onEdit,
+    onDelete,
+    onViewQuestions,
+    onSelect,
+    onBulkUpload,
+    onAddQuestion,
+    isSelected,
+  }: any) => (
     <motion.div
       variants={itemVariants}
       whileHover={{ y: -4 }}
-      className="bg-white rounded-xl border border-gray-100 shadow-lg hover:shadow-xl transition-all duration-300 overflow-hidden cursor-pointer"
+      className={`bg-white rounded-xl border shadow-lg hover:shadow-xl transition-all duration-300 overflow-hidden cursor-pointer ${
+        isSelected ? "border-emerald-400 ring-2 ring-emerald-100" : "border-gray-100"
+      }`}
       onClick={() => onSelect(bank)}
     >
       <div className="p-5">
@@ -2385,6 +2396,31 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
           </div>
         </div>
 
+        <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              onBulkUpload(bank);
+            }}
+            className="w-full gap-2"
+          >
+            <Upload className="h-4 w-4" />
+            Bulk Upload
+          </Button>
+          <Button
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              onAddQuestion(bank);
+            }}
+            className="w-full gap-2 bg-gradient-to-r from-emerald-500 to-teal-600"
+          >
+            <Plus className="h-4 w-4" />
+            Add Question
+          </Button>
+        </div>
       </div>
     </motion.div>
   );
@@ -2415,6 +2451,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
   );
 
   const activeQuestionBanks = questionBanks.filter(isQuestionBankInActiveLevel);
+  const selectedQuestionBankId = getQuestionBankId(selectedQuestionBank);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-white to-gray-50">
@@ -2509,7 +2546,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
           <CardContent className="p-0">
             <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
               <div className="overflow-x-auto border-b border-gray-200 px-3 pt-3 sm:px-6 sm:pt-6">
-                <TabsList className="inline-grid min-w-[620px] grid-cols-4 gap-2 bg-transparent sm:w-full sm:min-w-0 sm:gap-4">
+                <TabsList className="inline-grid min-w-[480px] grid-cols-3 gap-2 bg-transparent sm:w-full sm:min-w-0 sm:gap-4">
                   <TabsTrigger
                     value="dashboard"
                     className="whitespace-nowrap px-3 text-xs transition-all duration-300 data-[state=active]:bg-gradient-to-r data-[state=active]:from-emerald-500 data-[state=active]:to-teal-600 data-[state=active]:text-white sm:text-sm"
@@ -2530,13 +2567,6 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                   >
                     <Calendar className="h-4 w-4 mr-2" />
                     Batches
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="questions"
-                    className="whitespace-nowrap px-3 text-xs transition-all duration-300 data-[state=active]:bg-gradient-to-r data-[state=active]:from-emerald-500 data-[state=active]:to-teal-600 data-[state=active]:text-white sm:text-sm"
-                  >
-                    <Database className="h-4 w-4 mr-2" />
-                    Questions
                   </TabsTrigger>
                 </TabsList>
               </div>
@@ -2672,7 +2702,6 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                       onViewQuestions={(b: QuestionBank) => {
                         setSelectedQuestionBank(b);
                         setSelectedBatch(null);
-                        setActiveTab("questions");
                       }}
                       onSelect={(b: QuestionBank) => {
                         if (getQuestionBankId(selectedQuestionBank) === getQuestionBankId(b)) {
@@ -2683,9 +2712,188 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                           setSelectedBatch(null);
                         }
                       }}
+                      onBulkUpload={(b: QuestionBank) => {
+                        setSelectedQuestionBank(b);
+                        setSelectedBatch(null);
+                        setShowBulkQuestionDialog(true);
+                      }}
+                      onAddQuestion={(b: QuestionBank) => {
+                        setSelectedQuestionBank(b);
+                        setSelectedBatch(null);
+                        resetQuestionForm();
+                        setEditingQuestion(null);
+                        setShowQuestionDialog(true);
+                      }}
+                      isSelected={Boolean(selectedQuestionBankId) && selectedQuestionBankId === getQuestionBankId(bank)}
                     />
                   ))}
                 </motion.div>
+
+                <div className="rounded-xl border border-gray-100 bg-gray-50/70 p-4 sm:p-5">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-900">Questions in Question Bank</h4>
+                      <p className="text-sm text-gray-500">
+                        {selectedQuestionBank
+                          ? `Managing questions for ${selectedQuestionBank.bankName}`
+                          : "Select a question bank to view, add, or bulk upload questions"}
+                      </p>
+                    </div>
+
+                    <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap lg:w-auto">
+                      <Select
+                        value={selectedQuestionBankId?.toString() || ""}
+                        onValueChange={(val) => {
+                          const bank = activeQuestionBanks.find(
+                            b => getQuestionBankId(b)?.toString() === val
+                          );
+
+                          setSelectedQuestionBank(bank || null);
+                          setSelectedBatch(null);
+                        }}
+                      >
+                        <SelectTrigger className="w-full sm:w-[260px]">
+                          <SelectValue placeholder="Select Question Bank" />
+                        </SelectTrigger>
+
+                        <SelectContent>
+                          {activeQuestionBanks
+                            .filter(bank => getQuestionBankId(bank) !== null)
+                            .map((bank) => {
+                              const bankId = getQuestionBankId(bank);
+
+                              return (
+                                <SelectItem key={bankId} value={bankId!.toString()}>
+                                  {bank.bankName} ({bank.totalQuestions || 0} Qs)
+                                </SelectItem>
+                              );
+                            })}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid w-full grid-cols-1 gap-3 sm:grid-cols-3 lg:w-auto">
+                    <Button variant="outline" onClick={downloadQuestionTemplate} className="w-full gap-2">
+                      <Download className="h-4 w-4" />
+                      Template
+                    </Button>
+
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (!selectedQuestionBank) {
+                          showAlert("Select Question Bank", "Please select a question bank first");
+                          return;
+                        }
+
+                        setShowBulkQuestionDialog(true);
+                      }}
+                      className="w-full gap-2"
+                    >
+                      <Upload className="h-4 w-4" />
+                      Bulk Upload
+                    </Button>
+
+                    <Button
+                      onClick={() => {
+                        if (!selectedQuestionBank) {
+                          showAlert("Select Question Bank", "Please select a question bank first");
+                          return;
+                        }
+
+                        resetQuestionForm();
+                        setEditingQuestion(null);
+                        setShowQuestionDialog(true);
+                      }}
+                      className="w-full bg-gradient-to-r from-emerald-500 to-teal-600"
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      Add Question
+                    </Button>
+                  </div>
+
+                  <div className="mt-4 space-y-4">
+                    {!selectedQuestionBank && (
+                      <Alert className="bg-amber-50 border-amber-200 text-amber-800">
+                        <AlertCircle className="h-4 w-4" />
+                        <AlertDescription>
+                          Please select a question bank above to view or add questions.
+                        </AlertDescription>
+                      </Alert>
+                    )}
+
+                    {selectedQuestionBank && !selectedBatch && (
+                      <Alert className="bg-blue-50 border-blue-200 text-blue-800">
+                        <BookOpen className="h-4 w-4" />
+                        <AlertDescription>
+                          Questions will be saved directly in <strong>{selectedQuestionBank.bankName}</strong>. Batch selection is not required.
+                        </AlertDescription>
+                      </Alert>
+                    )}
+
+                    {selectedQuestionBank && selectedBatch && (
+                      <Alert className="bg-emerald-50 border-emerald-200 text-emerald-800">
+                        <BookOpen className="h-4 w-4" />
+                        <AlertDescription>
+                          Viewing questions for batch <strong>{selectedBatch.batchCode}</strong>. New uploads still save to <strong>{selectedQuestionBank.bankName}</strong>.
+                        </AlertDescription>
+                      </Alert>
+                    )}
+
+                    {loading && (
+                      <div className="flex justify-center py-12">
+                        <Loader2 className="h-8 w-8 animate-spin text-emerald-600" />
+                      </div>
+                    )}
+
+                    {!loading && selectedQuestionBank && questions.length === 0 && (
+                      <div className="text-center py-12">
+                        <Database className="h-16 w-16 mx-auto text-gray-300 mb-4" />
+                        <h3 className="text-lg font-semibold text-gray-900 mb-2">No Questions Found</h3>
+                        <p className="text-gray-500 mb-4">
+                          No questions in this question bank yet. Add questions manually or upload in bulk.
+                        </p>
+                        <div className="flex gap-3 justify-center flex-wrap">
+                          <Button variant="outline" onClick={downloadQuestionTemplate}>Download Template</Button>
+                          <Button
+                            onClick={() => {
+                              resetQuestionForm();
+                              setEditingQuestion(null);
+                              setShowQuestionDialog(true);
+                            }}
+                          >
+                            Add Question
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                    <motion.div
+                      variants={containerVariants}
+                      initial={false}
+                      animate="visible"
+                      className="space-y-4"
+                    >
+                      {questions.map((question) => (
+                        <QuestionCard
+                          key={getQuestionId(question) || question.text}
+                          question={question}
+                          onDelete={handleDeleteQuestion}
+                          onEdit={(q) => {
+                            setEditingQuestion(q);
+                            setQuestionFormData(q);
+                            setShowQuestionDialog(true);
+                          }}
+                          onPreview={(q) => {
+                            setPreviewQuestion(q);
+                            setShowPreviewDialog(true);
+                          }}
+                        />
+                      ))}
+                    </motion.div>
+                  </div>
+                </div>
               </TabsContent>
 
               {/* Batches Tab */}
@@ -2771,7 +2979,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                           }
                         );
                         setSelectedBatch(b);
-                        setActiveTab("questions");
+                        setActiveTab("questionBanks");
                       }}
                       onViewCandidates={(b: Batch) => {
                         setSelectedBatch(b);
@@ -2792,157 +3000,6 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                 </motion.div>
               </TabsContent>
 
-              {/* Questions Tab */}
-              <TabsContent value="questions" className="space-y-5 p-4 sm:p-6">
-                {/* Selection Status */}
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap lg:w-auto">
-                    <Select
-                      value={getQuestionBankId(selectedQuestionBank)?.toString() || ""}
-                      onValueChange={(val) => {
-                        const bank = activeQuestionBanks.find(
-                          b => getQuestionBankId(b)?.toString() === val
-                        );
-
-                        setSelectedQuestionBank(bank || null);
-                        setSelectedBatch(null);
-                      }}
-                    >
-                      <SelectTrigger className="w-full sm:w-[250px]">
-                        <SelectValue placeholder="Select Question Bank" />
-                      </SelectTrigger>
-
-                      <SelectContent>
-                        {activeQuestionBanks
-                          .filter(bank => getQuestionBankId(bank) !== null)
-                          .map((bank) => {
-                            const bankId = getQuestionBankId(bank);
-
-                            return (
-                              <SelectItem key={bankId} value={bankId!.toString()}>
-                                {bank.bankName} ({bank.totalQuestions || 0} Qs)
-                              </SelectItem>
-                            );
-                          })}
-                      </SelectContent>
-                    </Select>
-
-                  </div>
-                  <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-3 lg:w-auto">
-                    <Button variant="outline" onClick={downloadQuestionTemplate} className="w-full gap-2">
-                      <Download className="h-4 w-4" />
-                      Template
-                    </Button>
-
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        if (!selectedQuestionBank) {
-                          showAlert("Select Question Bank", "Please select a question bank first");
-                          return;
-                        }
-
-                        setShowBulkQuestionDialog(true);
-                      }}
-                      className="w-full gap-2"
-                    >
-                      <Upload className="h-4 w-4" />
-                      Bulk Upload
-                    </Button>
-
-                    <Button
-                      onClick={() => {
-                        if (!selectedQuestionBank) {
-                          showAlert("Select Question Bank", "Please select a question bank first");
-                          return;
-                        }
-
-                        resetQuestionForm();
-                        setEditingQuestion(null);
-                        setShowQuestionDialog(true);
-                      }}
-                      className="w-full bg-gradient-to-r from-emerald-500 to-teal-600"
-                    >
-                      <Plus className="h-4 w-4 mr-2" />
-                      Add Question
-                    </Button>
-                  </div>
-                </div>
-
-                {/* Info Alerts */}
-                {!selectedQuestionBank && (
-                  <Alert className="bg-amber-50 border-amber-200 text-amber-800">
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>
-                      Please select a question bank from the dropdown above to view or add questions.
-                    </AlertDescription>
-                  </Alert>
-                )}
-
-                {selectedQuestionBank && !selectedBatch && (
-                  <Alert className="bg-blue-50 border-blue-200 text-blue-800">
-                    <BookOpen className="h-4 w-4" />
-                    <AlertDescription>
-                      Questions will be saved directly in <strong>{selectedQuestionBank.bankName}</strong>. Batch selection is not required.
-                    </AlertDescription>
-                  </Alert>
-                )}
-
-                {selectedQuestionBank && selectedBatch && (
-                  <Alert className="bg-emerald-50 border-emerald-200 text-emerald-800">
-                    <BookOpen className="h-4 w-4" />
-                    <AlertDescription>
-                      Viewing questions for batch <strong>{selectedBatch.batchCode}</strong>. New uploads still save to <strong>{selectedQuestionBank.bankName}</strong>.
-                    </AlertDescription>
-                  </Alert>
-                )}
-
-                {loading && (
-                  <div className="flex justify-center py-12">
-                    <Loader2 className="h-8 w-8 animate-spin text-emerald-600" />
-                  </div>
-                )}
-
-                {!loading && selectedQuestionBank && questions.length === 0 && (
-                  <div className="text-center py-12">
-                    <Database className="h-16 w-16 mx-auto text-gray-300 mb-4" />
-                    <h3 className="text-lg font-semibold text-gray-900 mb-2">No Questions Found</h3>
-                    <p className="text-gray-500 mb-4">
-                      No questions in this question bank yet. Add questions manually or upload in bulk.
-                    </p>
-                    {selectedQuestionBank && (
-                      <div className="flex gap-3 justify-center flex-wrap">
-                        <Button variant="outline" onClick={downloadQuestionTemplate}>Download Template</Button>
-                        <Button onClick={() => setShowQuestionDialog(true)}>Add Question</Button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <motion.div
-                  variants={containerVariants}
-                  initial={false}
-                  animate="visible"
-                  className="space-y-4"
-                >
-                  {questions.map((question) => (
-                    <QuestionCard
-                      key={question.questionId}
-                      question={question}
-                      onDelete={handleDeleteQuestion}
-                      onEdit={(q) => {
-                        setEditingQuestion(q);
-                        setQuestionFormData(q);
-                        setShowQuestionDialog(true);
-                      }}
-                      onPreview={(q) => {
-                        setPreviewQuestion(q);
-                        setShowPreviewDialog(true);
-                      }}
-                    />
-                  ))}
-                </motion.div>
-              </TabsContent>
             </Tabs>
           </CardContent>
         </Card>

@@ -1,11 +1,11 @@
 
-// export const BASE_URL = "http://localhost:9090";
-export const BASE_URL = " https://amino-viability-clobber.ngrok-free.dev";
-// export const BASE_URL1 = "http://localhost:9090/api";
-export const BASE_URL1 = " https://amino-viability-clobber.ngrok-free.dev/api";
+//export const BASE_URL = "http://localhost:9090";
+export const BASE_URL = "  https://nursequiz-bacckend-3.onrender.com";
+//export const BASE_URL1 = "http://localhost:9090/api";
+ export const BASE_URL1 = "  https://nursequiz-bacckend-3.onrender.com/api";
 
-// export const BASE_URL3="http://localhost:9090/api";
-export const BASE_URL3 = " https://amino-viability-clobber.ngrok-free.dev/";
+//export const BASE_URL3="http://localhost:9090/api";
+ export const BASE_URL3 = "  https://nursequiz-bacckend-3.onrender.com";
 
 
 // Exam Management APIs
