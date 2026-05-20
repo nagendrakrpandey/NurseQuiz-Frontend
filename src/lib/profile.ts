@@ -235,7 +235,7 @@ export const fetchTeamMembersByUserId = async (userId: number | string, signal?:
 export const formatTeamRole = (role: string) => {
   const roleMap: Record<string, string> = {
     lead: "Operation Theatre (OT)",
-    member: "Intensive Care Unit (ICCU)",
+    member: "Intensive Care Unit (ICU)",
     admin: "Central Sterile Supply Dept (CSSD)",
   };
   const normalizedRole = role.trim().toLowerCase();

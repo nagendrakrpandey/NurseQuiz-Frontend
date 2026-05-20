@@ -28,7 +28,7 @@ import { EXAM_API, Candidate, ExamSchedule, Enrollment } from "@/Service/api";
 
 const ExamManagementTab = () => {
   const [activeTab, setActiveTab] = useState("candidates");
-  const [selectedLevel, setSelectedLevel] = useState<"district" | "state" | "national">("district");
+  const [selectedLevel, setSelectedLevel] = useState<"district" | "regional" | "state">("district");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   
   // Candidates State
@@ -357,6 +357,15 @@ const ExamManagementTab = () => {
         borderColor: "border-blue-200",
         textColor: "text-blue-600",
       },
+      regional: {
+        icon: Crown,
+        name: "Regional Level",
+        color: "amber",
+        gradient: "from-amber-500 to-orange-500",
+        bgGradient: "from-amber-50 to-orange-50",
+        borderColor: "border-amber-200",
+        textColor: "text-amber-600",
+      },
       state: {
         icon: Trophy,
         name: "State Level",
@@ -365,15 +374,6 @@ const ExamManagementTab = () => {
         bgGradient: "from-purple-50 to-pink-50",
         borderColor: "border-purple-200",
         textColor: "text-purple-600",
-      },
-      national: {
-        icon: Crown,
-        name: "National Level",
-        color: "amber",
-        gradient: "from-amber-500 to-orange-500",
-        bgGradient: "from-amber-50 to-orange-50",
-        borderColor: "border-amber-200",
-        textColor: "text-amber-600",
       },
     };
     return configs[level as keyof typeof configs] || configs.district;
@@ -522,8 +522,8 @@ const ExamManagementTab = () => {
         >
           {[
             { id: "district", name: "District Level", icon: Award, color: "blue", description: "Foundation & Basic Knowledge", examCount: 12 },
+            { id: "regional", name: "Regional Level", icon: Crown, color: "amber", description: "Expert & Leadership Excellence", examCount: 5 },
             { id: "state", name: "State Level", icon: Trophy, color: "purple", description: "Advanced & Professional Skills", examCount: 8 },
-            { id: "national", name: "National Level", icon: Crown, color: "amber", description: "Expert & Leadership Excellence", examCount: 5 },
           ].map((level) => (
             <motion.button
               key={level.id}

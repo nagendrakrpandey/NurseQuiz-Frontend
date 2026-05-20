@@ -48,6 +48,8 @@ import {
 } from "@/pages/evidence/EvidenceShared";
 
 type LeaderboardStatus = "not_started" | "in_progress" | "completed";
+type LeaderboardStatusFilter = LeaderboardStatus | "active";
+type LevelFilter = LevelOption | "";
 
 interface LeaderboardRow {
   rank: number;
@@ -69,11 +71,24 @@ interface LeaderboardRow {
 
 const LEVEL_OPTIONS: Array<{ value: LevelOption; label: string }> = [
   { value: "district", label: "District" },
+  { value: "regional", label: "Regional" },
   { value: "state", label: "State" },
-  { value: "national", label: "National" },
+];
+
+const STATUS_FILTER_OPTIONS: Array<{ value: LeaderboardStatusFilter; label: string }> = [
+  { value: "active", label: "Started / Completed" },
+  { value: "in_progress", label: "In Progress" },
+  { value: "completed", label: "Completed" },
+  { value: "not_started", label: "Not Started" },
 ];
 
 const LIVE_REFRESH_MS = 10000;
+
+const isLevelOption = (value: unknown): value is LevelOption =>
+  LEVEL_OPTIONS.some((option) => option.value === value);
+
+const isStatusFilter = (value: unknown): value is LeaderboardStatusFilter =>
+  STATUS_FILTER_OPTIONS.some((option) => option.value === value);
 
 const toFiniteNumber = (value: unknown) => {
   const parsed = Number(value);
@@ -510,13 +525,12 @@ const MetricTile = ({
 const LiveLeaderboard = () => {
   const requestIdRef = useRef(0);
   const organizationDirectoryRef = useRef<OrganizationDirectory | null>(null);
-  const [level, setLevel] = useState<LevelOption>(
-    (localStorage.getItem("level") as LevelOption) || "district"
-  );
+  const [level, setLevel] = useState<LevelFilter>("");
   const [batches, setBatches] = useState<BatchOption[]>([]);
-  const [selectedBatchId, setSelectedBatchId] = useState("all");
+  const [selectedBatchId, setSelectedBatchId] = useState("");
   const [rows, setRows] = useState<LeaderboardRow[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
+  const [statusFilter, setStatusFilter] = useState<LeaderboardStatusFilter>("active");
   const [loadingBatches, setLoadingBatches] = useState(false);
   const [loadingRows, setLoadingRows] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -643,10 +657,7 @@ const LiveLeaderboard = () => {
         const normalizedBatches = Array.isArray(data)
           ? data.map((item) => normalizeBatch(item as Record<string, unknown>))
           : [];
-        const storedBatchId = localStorage.getItem("batchId") || "";
-        const nextBatchId = normalizedBatches.some((batch) => String(getBatchId(batch)) === storedBatchId)
-          ? storedBatchId
-          : "all";
+        const nextBatchId = "all";
 
         setBatches(normalizedBatches);
         setSelectedBatchId(nextBatchId);
@@ -664,11 +675,20 @@ const LiveLeaderboard = () => {
   );
 
   useEffect(() => {
+    if (!level) {
+      setBatches([]);
+      setSelectedBatchId("");
+      setRows([]);
+      setLastUpdated(null);
+      setError("");
+      return;
+    }
+
     void loadBatches(level);
   }, [level, loadBatches]);
 
   useEffect(() => {
-    if (!autoRefresh || !batches.length) return;
+    if (!level || !autoRefresh || !batches.length || !selectedBatchId) return;
 
     const timer = window.setInterval(() => {
       void loadLeaderboard(batches, selectedBatchId, true);
@@ -678,32 +698,41 @@ const LiveLeaderboard = () => {
   }, [autoRefresh, batches, loadLeaderboard, selectedBatchId]);
 
   const handleLevelChange = (nextLevel: string) => {
-    const typedLevel = nextLevel as LevelOption;
-    localStorage.setItem("level", typedLevel);
+    if (!isLevelOption(nextLevel)) return;
+
+    const typedLevel = nextLevel;
+    if (typedLevel === level) return;
+
+    setSelectedBatchId("all");
     setLevel(typedLevel);
   };
 
   const handleBatchChange = (batchId: string) => {
     setSelectedBatchId(batchId);
-    if (batchId !== "all") {
-      localStorage.setItem("batchId", batchId);
-      const batch = batches.find((item) => String(getBatchId(item)) === batchId);
-      if (batch) localStorage.setItem("batchCode", getBatchCode(batch));
-    }
     void loadLeaderboard(batches, batchId);
+  };
+
+  const handleStatusFilterChange = (value: string) => {
+    if (!isStatusFilter(value)) return;
+
+    setStatusFilter(value);
   };
 
   const filteredRows = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
-    if (!query) return rows;
 
-    return rows.filter((row) =>
-      [row.organizationName, row.email, row.enrollmentNo, row.batchCode]
-        .join(" ")
-        .toLowerCase()
-        .includes(query)
-    );
-  }, [rows, searchTerm]);
+    return rows.filter((row) => {
+      const matchesStatus = statusFilter === "active" ? row.status !== "not_started" : row.status === statusFilter;
+      const matchesSearch =
+        !query ||
+        [row.organizationName, row.email, row.enrollmentNo, row.batchCode]
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+
+      return matchesStatus && matchesSearch;
+    });
+  }, [rows, searchTerm, statusFilter]);
 
   const summary = useMemo(() => {
     const activeCount = rows.filter((row) => row.status !== "not_started").length;
@@ -738,10 +767,10 @@ const LiveLeaderboard = () => {
           </div>
 
           <div className="flex w-full flex-col gap-2 xl:w-auto xl:items-end">
-            <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-[140px_minmax(190px,240px)_118px_118px] xl:w-auto">
+            <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-[140px_minmax(190px,240px)_160px_118px_118px] xl:w-auto">
             <Select value={level} onValueChange={handleLevelChange}>
               <SelectTrigger className="h-10 w-full rounded-lg border-slate-200 bg-white">
-                <SelectValue placeholder="Level" />
+                <SelectValue placeholder="Select Level" />
               </SelectTrigger>
               <SelectContent>
                 {LEVEL_OPTIONS.map((option) => (
@@ -752,22 +781,35 @@ const LiveLeaderboard = () => {
               </SelectContent>
             </Select>
 
-            <Select value={selectedBatchId} onValueChange={handleBatchChange} disabled={loadingBatches}>
+            <Select value={selectedBatchId} onValueChange={handleBatchChange} disabled={!level || loadingBatches}>
               <SelectTrigger className="h-10 w-full rounded-lg border-slate-200 bg-white">
-                <SelectValue placeholder={loadingBatches ? "Loading batches..." : "Batch"} />
+                <SelectValue placeholder={!level ? "Select level first" : loadingBatches ? "Loading exams..." : "Exam"} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All batches</SelectItem>
+                <SelectItem value="all">All exams</SelectItem>
                 {batches.map((batch) => {
                   const batchId = getBatchId(batch);
                   if (!batchId) return null;
 
                   return (
                     <SelectItem key={batchId} value={String(batchId)}>
-                      {getBatchCode(batch) || `Batch ${batchId}`}
+                      {getBatchCode(batch) || `Exam ${batchId}`}
                     </SelectItem>
                   );
                 })}
+              </SelectContent>
+            </Select>
+
+            <Select value={statusFilter} onValueChange={handleStatusFilterChange}>
+              <SelectTrigger className="h-10 w-full rounded-lg border-slate-200 bg-white">
+                <SelectValue placeholder="Status" />
+              </SelectTrigger>
+              <SelectContent>
+                {STATUS_FILTER_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
 
@@ -775,7 +817,7 @@ const LiveLeaderboard = () => {
               variant="outline"
               className="h-10 w-full rounded-lg border-slate-200 bg-white"
               onClick={() => loadLeaderboard(batches, selectedBatchId)}
-              disabled={loadingRows || loadingBatches}
+              disabled={!level || loadingRows || loadingBatches}
             >
               {loadingRows || refreshing ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -836,7 +878,11 @@ const LiveLeaderboard = () => {
         <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-50/60 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h3 className="text-base font-semibold text-slate-950">
-              {selectedBatch ? getBatchCode(selectedBatch) || `Batch ${selectedBatchId}` : "All batches"} standings
+              {!level
+                ? "Select a level"
+                : selectedBatch
+                  ? `${getBatchCode(selectedBatch) || `Exam ${selectedBatchId}`} standings`
+                  : "All exams standings"}
             </h3>
             <p className="mt-1 text-xs text-slate-500">
               {filteredRows.length} organization{filteredRows.length === 1 ? "" : "s"} shown
@@ -849,6 +895,7 @@ const LiveLeaderboard = () => {
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
               placeholder="Search organization..."
+              disabled={!level}
               className="h-10 rounded-lg border-slate-200 bg-white pl-9"
             />
           </div>
@@ -873,11 +920,11 @@ const LiveLeaderboard = () => {
                 <TableRow className="border-b border-slate-200 bg-white">
                   <TableHead className="h-11 w-[84px] px-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Rank</TableHead>
                   <TableHead className="h-11 min-w-[240px] text-xs font-semibold uppercase tracking-wide text-slate-500">Organization Name</TableHead>
-                  <TableHead className="h-11 text-xs font-semibold uppercase tracking-wide text-slate-500">Batch</TableHead>
+                  <TableHead className="h-11 text-xs font-semibold uppercase tracking-wide text-slate-500">Exam</TableHead>
                   <TableHead className="h-11 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Score</TableHead>
                   <TableHead className="h-11 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Attempted</TableHead>
                   <TableHead className="h-11 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Time</TableHead>
-                  <TableHead className="h-11 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Tabs</TableHead>
+                  <TableHead className="h-11 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">Tab switch</TableHead>
                   <TableHead className="h-11 text-xs font-semibold uppercase tracking-wide text-slate-500">Status</TableHead>
                   <TableHead className="h-11 min-w-[160px] text-xs font-semibold uppercase tracking-wide text-slate-500">Last Activity</TableHead>
                 </TableRow>
@@ -900,16 +947,7 @@ const LiveLeaderboard = () => {
                     </TableCell>
                     <TableCell className="py-4 font-medium text-slate-700">{row.batchCode}</TableCell>
                     <TableCell className="py-4 text-right">
-                      <div className="font-bold text-slate-950">
-                        {row.score}/{row.totalMarks || row.totalQuestions || 0}
-                      </div>
-                      <div className="ml-auto mt-1 h-1.5 w-24 overflow-hidden rounded-full bg-slate-100">
-                        <div
-                          className="h-full rounded-full bg-emerald-500"
-                          style={{ width: `${Math.min(100, row.percentage)}%` }}
-                        />
-                      </div>
-                      <p className="mt-1 text-xs text-slate-500">{Math.round(row.percentage)}%</p>
+                      <div className="font-bold text-slate-950">{Math.round(row.percentage)}%</div>
                     </TableCell>
                     <TableCell className="py-4 text-right font-semibold text-slate-800">
                       {row.attemptedQuestions}/{row.totalQuestions || "--"}
@@ -941,8 +979,12 @@ const LiveLeaderboard = () => {
           <div className="py-12">
             <EmptyState
               icon={Trophy}
-              title="No leaderboard data"
-              description="No enrolled organizations or saved responses were found for the selected filters."
+              title={!level ? "Select a level" : "No leaderboard data"}
+              description={
+                !level
+                  ? "Choose a level to load leaderboard data."
+                  : "No enrolled organizations or saved responses were found for the selected filters."
+              }
             />
           </div>
         )}

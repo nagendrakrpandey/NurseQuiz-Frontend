@@ -59,14 +59,6 @@ export const useDashboardData = () => {
         if (signal?.aborted) return;
         const localScoreSummary = getStoredDashboardScoreSummary(storedUser);
         let dashboardWithScore = mergeDashboardScoreSummary(response, localScoreSummary);
-        try {
-          const examResult = await fetchDashboardExamResult(signal);
-          if (signal?.aborted) return;
-          dashboardWithScore = mergeDashboardExamResult(dashboardWithScore, examResult);
-        } catch (examResultError) {
-          if (signal?.aborted) return;
-          console.warn("Unable to load exam result status; using dashboard/local result data.", examResultError);
-        }
         const responseCandidateId =
           getDashboardCandidateId(storedUser) ||
           response.candidateId ||
@@ -80,6 +72,15 @@ export const useDashboardData = () => {
         } catch (scoreError) {
           if (signal?.aborted) return;
           console.warn("Unable to load dashboard response score; using dashboard/local result data.", scoreError);
+        }
+
+        try {
+          const examResult = await fetchDashboardExamResult(signal);
+          if (signal?.aborted) return;
+          dashboardWithScore = mergeDashboardExamResult(dashboardWithScore, examResult);
+        } catch (examResultError) {
+          if (signal?.aborted) return;
+          console.warn("Unable to load exam result status; using dashboard/local result data.", examResultError);
         }
 
         setDashboardData(applyDashboardExamCompletionOverride(dashboardWithScore, userId));

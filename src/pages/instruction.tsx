@@ -2,13 +2,14 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useNavigate } from "react-router-dom";
 import { Camera, AlertCircle, CheckCircle, User, FileText, X, Loader } from 'lucide-react';
-import { BASE_URL, BASE_URL1 } from "@/Service/api";
+import { BASE_URL, BASE_URL1, registerFaceReference, type FaceRegisterResponse } from "@/Service/api";
 import { EXAM_INSTRUCTION_DONE_KEY } from "@/lib/session";
 import {
+  JPEG_MIME_TYPE,
   PNG_MIME_TYPE,
-  buildEvidenceJsonPayload,
   canvasToBlob,
   dataUrlToBlob,
+  getPreferredVideoMimeType,
   uploadEvidenceMedia
 } from "@/lib/evidenceMedia";
 
@@ -50,8 +51,16 @@ interface ImageFeatures {
   whiteRatio: number;
   darkTextRatio: number;
   contrast: number;
+  facePresent: boolean;
+  documentPresent: boolean;
   faceLike: boolean;
   documentLike: boolean;
+}
+
+interface UploadCaptureResult {
+  success: boolean;
+  message?: string;
+  keepCapture?: boolean;
 }
 
 interface BatchRecord {
@@ -152,6 +161,28 @@ const getLatestEnrollmentTime = (batch: BatchRecord, candidate: CandidateRecord)
   );
 };
 
+const getFaceRegisterFailureMessage = (result: FaceRegisterResponse, memberName?: string) => {
+  const name = memberName || 'this team member';
+
+  if (result.status === 'error') {
+    const reasonMessages: Record<string, string> = {
+      user_id_and_team_member_id_required: 'Unable to map this selfie to the logged-in user and team member. Please login again.',
+      invalid_image: 'The face service could not read this selfie. Please capture a clear image again.',
+    };
+
+    return reasonMessages[result.reason || ''] || 'Face registration failed. Please capture the selfie again.';
+  }
+
+  const statusMessages: Record<string, string> = {
+    no_face: `No face detected for ${name}. Please capture a clear selfie.`,
+    multiple_faces: `Multiple faces detected for ${name}. Please make sure only this team member is visible.`,
+    too_far: `The face is too far for ${name}. Please move closer and capture again.`,
+    blurry: `The selfie for ${name} is blurry. Please retake it with a steady camera.`
+  };
+
+  return statusMessages[result.status] || 'Face registration failed. Please capture the selfie again.';
+};
+
 // Custom Dialog Component
 const CustomDialog = ({ isOpen, onClose, title, message, type }: { 
   isOpen: boolean; 
@@ -206,6 +237,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [checkingExamMedia, setCheckingExamMedia] = useState(false);
   const [batchCode, setBatchCode] = useState<string>('');
   
   // Dialog state
@@ -224,13 +256,98 @@ function App() {
     setDialog({ isOpen: false, title: '', message: '', type: 'info' });
   };
 
-  const createCaptureFileName = useCallback((item: CaptureItem, capturedAt = new Date()) => {
+  useEffect(() => {
+    if (
+      localStorage.getItem(EXAM_INSTRUCTION_DONE_KEY) === "true" ||
+      sessionStorage.getItem(EXAM_INSTRUCTION_DONE_KEY) === "true"
+    ) {
+      navigate(`/Exam${window.location.search || ''}`, { replace: true });
+    }
+  }, [navigate]);
+
+  const requestExamRecordingPermission = useCallback(async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showDialog(
+        'Camera & Microphone Required',
+        'This browser does not support camera and microphone recording. Please use Chrome or Edge.',
+        'error',
+      );
+      return false;
+    }
+
+    if (typeof MediaRecorder === 'undefined') {
+      showDialog(
+        'WebM Recording Required',
+        'This browser does not support exam video recording. Please use Chrome or Edge.',
+        'error',
+      );
+      return false;
+    }
+
+    const webmMimeType = getPreferredVideoMimeType(true);
+    if (!webmMimeType || !webmMimeType.toLowerCase().includes('webm')) {
+      showDialog(
+        'WebM Recording Required',
+        'Exam video must record in WebM format with microphone audio. Please use Chrome or Edge.',
+        'error',
+      );
+      return false;
+    }
+
+    let stream: MediaStream | null = null;
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 },
+        },
+        audio: {
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: 48000 },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
+
+      const hasLiveVideo = stream.getVideoTracks().some((track) => track.readyState === 'live' && track.enabled);
+      const hasLiveAudio = stream.getAudioTracks().some((track) => track.readyState === 'live' && track.enabled);
+
+      if (!hasLiveVideo || !hasLiveAudio) {
+        throw new Error('Camera and microphone tracks are required.');
+      }
+
+      new MediaRecorder(stream, {
+        mimeType: webmMimeType,
+        videoBitsPerSecond: 800_000,
+        audioBitsPerSecond: 128_000,
+      });
+
+      return true;
+    } catch (permissionError) {
+      console.error('Exam recording permission failed:', permissionError);
+      showDialog(
+        'Camera & Microphone Required',
+        'Exam start karne ke liye camera aur microphone dono Allow karein. Microphone permission ke bina exam start nahi hoga.',
+        'error',
+      );
+      return false;
+    } finally {
+      stream?.getTracks().forEach((track) => track.stop());
+    }
+  }, []);
+
+  const createCaptureFileName = useCallback((item: CaptureItem, capturedAt = new Date(), mimeType = PNG_MIME_TYPE) => {
     const datePart = `${capturedAt.getFullYear()}${padNumber(capturedAt.getMonth() + 1)}${padNumber(capturedAt.getDate())}`;
     const timePart = `${padNumber(capturedAt.getHours())}${padNumber(capturedAt.getMinutes())}${padNumber(capturedAt.getSeconds())}`;
     const memberName = sanitizeFileNamePart(item.teamMemberName || 'candidate');
     const memberId = item.teamMemberId || 'candidate';
+    const extension = mimeType.toLowerCase().includes('jpeg') || mimeType.toLowerCase().includes('jpg') ? 'jpg' : 'png';
 
-    return `${item.type}_${memberId}_${memberName}_${datePart}_${timePart}.png`;
+    return `${item.type}_${memberId}_${memberName}_${datePart}_${timePart}.${extension}`;
   }, []);
   
   const [activeItemId, setActiveItemId] = useState<number | null>(null);
@@ -251,6 +368,21 @@ function App() {
   };
 
   const getToken = () => normalizeToken(localStorage.getItem('token'));
+
+  const getFaceUserId = useCallback(() => {
+    const storedUser = readStoredUser();
+    const values = [
+      storedUser.id,
+      storedUser.userId,
+      storedUser.user_id,
+      storedUser.user?.id,
+      localStorage.getItem('userId'),
+      localStorage.getItem('id'),
+    ];
+
+    const matchedValue = values.find((value) => value !== undefined && value !== null && String(value).trim());
+    return matchedValue ? String(matchedValue).trim() : '';
+  }, []);
 
   const resolveBatchCode = useCallback(async () => {
     const params = new URLSearchParams(window.location.search);
@@ -286,7 +418,7 @@ function App() {
       storedUser.level ||
       'district';
 
-    const levels = Array.from(new Set([levelHint, 'district', 'state', 'national']));
+    const levels = Array.from(new Set([levelHint, 'district', 'regional', 'state', 'national']));
     const matchedEnrollments: Array<{
       batch: BatchRecord;
       candidate: CandidateRecord;
@@ -433,6 +565,7 @@ const candidateResult = JSON.parse(text);
         }
 
         setTeamMembers(members);
+        localStorage.setItem("examTeamMembers", JSON.stringify(members));
         
         const newItems: CaptureItem[] = [];
         
@@ -504,10 +637,10 @@ const candidateResult = JSON.parse(text);
     setActiveItemId(null);
   }, []);
 
-  const uploadToBackend = useCallback(async (item: CaptureItem): Promise<boolean> => {
+  const uploadToBackend = useCallback(async (item: CaptureItem): Promise<UploadCaptureResult> => {
     if (!item.imageData || !item.teamMemberId) {
       console.error('Missing image data or team member ID');
-      return false;
+      return { success: false, message: 'Missing image data or team member ID' };
     }
 
     setItems(prevItems => 
@@ -528,8 +661,42 @@ const candidateResult = JSON.parse(text);
       if (!currentBatchCode) {
         throw new Error('No batch code found');
       }
-      const fileName = item.fileName || createCaptureFileName(item);
       const mimeType = item.mimeType || PNG_MIME_TYPE;
+      const fileName = item.fileName || createCaptureFileName(item, new Date(), mimeType);
+
+      if (item.type === 'selfie') {
+        const faceUserId = getFaceUserId();
+        if (!faceUserId) {
+          const message = 'Unable to map this selfie to the logged-in user. Please login again.';
+          setItems(prevItems =>
+            prevItems.map(i =>
+              i.id === item.id
+                ? { ...i, status: 'invalid', uploadStatus: 'failed', errorMessage: message }
+                : i
+            )
+          );
+          return { success: false, message, keepCapture: true };
+        }
+
+        const faceResult = await registerFaceReference({
+          user_id: faceUserId,
+          team_member_id: String(item.teamMemberId),
+          imageBase64: item.imageData
+        });
+
+        if (faceResult.status !== 'ok') {
+          const message = getFaceRegisterFailureMessage(faceResult, item.teamMemberName);
+          setItems(prevItems =>
+            prevItems.map(i =>
+              i.id === item.id
+                ? { ...i, status: 'invalid', uploadStatus: 'failed', errorMessage: message }
+                : i
+            )
+          );
+          return { success: false, message, keepCapture: true };
+        }
+      }
+
       const uploadInfo = createUploadAudit();
       const imageBlob = await dataUrlToBlob(item.imageData);
       const uploadSuccess = await uploadEvidenceMedia({
@@ -564,7 +731,7 @@ const candidateResult = JSON.parse(text);
               : i
           )
         );
-        return true;
+        return { success: true };
       }
 
       throw new Error('Upload failed');
@@ -577,9 +744,9 @@ const candidateResult = JSON.parse(text);
             : i
         )
       );
-      return false;
+      return { success: false, message: err instanceof Error ? err.message : 'Upload failed' };
     }
-  }, [resolveBatchCode, batchCode, createCaptureFileName]);
+  }, [resolveBatchCode, batchCode, createCaptureFileName, getFaceUserId]);
 
   const analyzeImageFeatures = useCallback((data: Uint8ClampedArray, width: number, height: number): ImageFeatures => {
     let faceBrightness = 0;
@@ -662,12 +829,16 @@ const candidateResult = JSON.parse(text);
     const hasGoodBrightness = avgBrightness > 60 && avgBrightness < 220;
     const hasSkinTones = skinRatio > 0.08;
     const hasFaceEdges = avgFaceEdgeIntensity > 8;
+    const hasAnySkinTone = skinRatio > 0.025;
+    const hasAnyFaceDetail = avgFaceEdgeIntensity > 3 || contrast > 6;
+    const facePresent = hasAnySkinTone && hasAnyFaceDetail;
+    const documentPresent =
+      edgeDensity > 0.015 &&
+      (whiteRatio > 0.08 || darkTextRatio > 0.008 || contrast > 5);
     const faceLike = hasGoodBrightness && hasSkinTones && hasFaceEdges;
     const documentLike =
-      !faceLike &&
-      edgeDensity > 0.035 &&
-      (whiteRatio > 0.18 || darkTextRatio > 0.025) &&
-      contrast > 10;
+      !facePresent &&
+      documentPresent;
 
     return {
       avgBrightness,
@@ -677,34 +848,28 @@ const candidateResult = JSON.parse(text);
       whiteRatio,
       darkTextRatio,
       contrast,
+      facePresent,
+      documentPresent,
       faceLike,
       documentLike
     };
   }, []);
 
   const validateSelfie = useCallback((features: ImageFeatures): { valid: boolean; message?: string } => {
-    const hasGoodBrightness = features.avgBrightness > 60 && features.avgBrightness < 220;
-    const hasSkinTones = features.skinRatio > 0.08;
-    const hasEdges = features.faceEdgeIntensity > 8;
-    
-    if (features.faceLike) {
+    if (features.facePresent || features.faceLike) {
       return { valid: true };
-    } else if (!hasSkinTones) {
-      return { valid: false, message: 'Face not detected. Selfie slot accepts only face photo.' };
-    } else if (!hasGoodBrightness) {
-      return { valid: false, message: 'Image too dark or too bright. Please ensure good lighting.' };
-    } else {
-      return { valid: false, message: 'Face not clearly visible. Please look straight into the camera.' };
     }
+
+    return { valid: false, message: 'Face not detected. Selfie slot accepts only face photo.' };
   }, []);
 
   const validateDocument = useCallback((features: ImageFeatures): { valid: boolean; message?: string } => {
-    if (features.faceLike) {
+    if (features.facePresent || features.faceLike) {
       return { valid: false, message: 'Face photo detected. Document slot accepts only document image.' };
     }
 
-    if (!features.documentLike) {
-      return { valid: false, message: 'Document not detected clearly. Please capture an ID/card/paper document.' };
+    if (!features.documentPresent && !features.documentLike) {
+      return { valid: false, message: 'Document not detected. Please capture an ID/card/paper document.' };
     }
 
     return { valid: true };
@@ -750,27 +915,31 @@ const candidateResult = JSON.parse(text);
     canvas.height = video.videoHeight;
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    const imageBlob = await canvasToBlob(canvas, PNG_MIME_TYPE);
+    const item = items.find(i => i.id === activeItemId);
+    if (!item) return;
+
+    const captureMimeType = item.type === 'selfie' ? JPEG_MIME_TYPE : PNG_MIME_TYPE;
+    const imageBlob = await canvasToBlob(canvas, captureMimeType, item.type === 'selfie' ? 0.92 : undefined);
     const imageData = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
 
-      reader.onerror = () => reject(new Error('Failed to prepare PNG image'));
+      reader.onerror = () => reject(new Error('Failed to prepare image'));
       reader.onloadend = () => {
         if (typeof reader.result === 'string') {
           resolve(reader.result);
           return;
         }
 
-        reject(new Error('Failed to prepare PNG image'));
+        reject(new Error('Failed to prepare image'));
       };
 
       reader.readAsDataURL(imageBlob);
     });
-    const item = items.find(i => i.id === activeItemId);
-    if (!item) return;
-    const fileName = createCaptureFileName(item);
+    const fileName = createCaptureFileName(item, new Date(), captureMimeType);
     
-    const validation = await validateImage(imageData, item.type);
+    const validation = item.type === 'selfie'
+      ? { valid: true }
+      : await validateImage(imageData, item.type);
     
     if (validation.valid) {
       setItems(prevItems => 
@@ -780,7 +949,7 @@ const candidateResult = JSON.parse(text);
                 ...i, 
                 imageData, 
                 fileName,
-                mimeType: PNG_MIME_TYPE,
+                mimeType: captureMimeType,
                 status: 'valid',
                 errorMessage: undefined
               }
@@ -792,17 +961,31 @@ const candidateResult = JSON.parse(text);
         ...item,
         imageData,
         fileName,
-        mimeType: PNG_MIME_TYPE,
+        mimeType: captureMimeType,
         status: 'valid' as ValidationStatus
       };
-      const uploadSuccess = await uploadToBackend(updatedItem);
+      const uploadResult = await uploadToBackend(updatedItem);
       
-      if (!uploadSuccess) {
-        showDialog('Upload Warning', 'Image captured but failed to save to server. Please try again.', 'error');
+      if (!uploadResult.success) {
+        showDialog(
+          item.type === 'selfie' ? 'Face Registration Failed' : 'Upload Warning',
+          uploadResult.message || 'Image captured but failed to save to server. Please try again.',
+          'error'
+        );
         setItems(prevItems => 
           prevItems.map(i => 
             i.id === activeItemId 
-              ? { ...i, status: 'pending', imageData: null, fileName: undefined, mimeType: undefined }
+              ? uploadResult.keepCapture
+                ? {
+                    ...i,
+                    imageData,
+                    fileName,
+                    mimeType: captureMimeType,
+                    status: 'invalid',
+                    uploadStatus: 'failed',
+                    errorMessage: uploadResult.message
+                  }
+                : { ...i, status: 'pending', imageData: null, fileName: undefined, mimeType: undefined }
               : i
           )
         );
@@ -811,7 +994,7 @@ const candidateResult = JSON.parse(text);
       setItems(prevItems => 
         prevItems.map(i => 
           i.id === activeItemId 
-            ? { ...i, imageData, fileName, mimeType: PNG_MIME_TYPE, status: 'invalid', errorMessage: validation.message }
+            ? { ...i, imageData, fileName, mimeType: captureMimeType, status: 'invalid', errorMessage: validation.message }
             : i
         )
       );
@@ -852,16 +1035,22 @@ const candidateResult = JSON.parse(text);
 
 
 const handleContinue = useCallback(async () => {
-  if (!allItemsValid) return;
+  if (!allItemsValid || checkingExamMedia) return;
+
+  setCheckingExamMedia(true);
+  const mediaReady = await requestExamRecordingPermission();
+  setCheckingExamMedia(false);
+
+  if (!mediaReady) return;
 
   showDialog('Success', 'All captures have been saved successfully!', 'success');
-  localStorage.removeItem(EXAM_INSTRUCTION_DONE_KEY);
+  localStorage.setItem(EXAM_INSTRUCTION_DONE_KEY, "true");
   sessionStorage.setItem(EXAM_INSTRUCTION_DONE_KEY, "true");
 
   setTimeout(() => {
     navigate(`/Exam${window.location.search || ''}`, { replace: true });
   }, 1500);
-}, [allItemsValid, navigate]);
+}, [allItemsValid, checkingExamMedia, navigate, requestExamRecordingPermission]);
 
   const renderCaptureCard = (item: CaptureItem) => {
     const isSelfie = item.type === 'selfie';
@@ -1124,24 +1313,24 @@ const handleContinue = useCallback(async () => {
         <div className="flex flex-col sm:flex-row gap-4 justify-center items-center pt-6 border-t border-gray-200">
           <button
             onClick={resetAll}
-            disabled={saving}
+            disabled={saving || checkingExamMedia}
             className="flex w-full items-center justify-center gap-2 rounded-xl bg-gray-100 px-6 py-3 font-medium text-gray-700 transition hover:bg-gray-200 disabled:opacity-50 sm:w-auto sm:px-8"
           >
             Reset All
           </button>
           <button
             onClick={handleContinue}
-            disabled={!allItemsValid || saving}
+            disabled={!allItemsValid || saving || checkingExamMedia}
             className={`flex w-full items-center justify-center gap-2 rounded-xl px-6 py-3 font-medium transition sm:w-auto sm:px-8 ${
-              allItemsValid && !saving
+              allItemsValid && !saving && !checkingExamMedia
                 ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white hover:from-blue-700 hover:to-purple-700 shadow-lg'
                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
             }`}
           >
-            {saving ? (
+            {saving || checkingExamMedia ? (
               <>
                 <Loader className="w-5 h-5 animate-spin" />
-                Saving...
+                {checkingExamMedia ? 'Checking microphone...' : 'Saving...'}
               </>
             ) : (
               <>

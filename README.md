@@ -1,3 +1,3 @@
-# Welcome to your Lovable project
+# Welcome to Nagendra NurseQuiz Project
 
 TODO: Document your project here

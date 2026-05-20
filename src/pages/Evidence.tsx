@@ -3,9 +3,15 @@ import EvidenceDetailsPage from "./evidence/EvidenceDetails";
 import EvidenceReportPage from "./evidence/EvidenceReport";
 import CandidateEvidenceList from "./evidence/EvidenceTable";
 
-const EvidencePage = () => {
+interface EvidencePageProps {
+  evidenceMode?: "completed" | "all";
+}
+
+const EvidencePage = ({ evidenceMode = "completed" }: EvidencePageProps) => {
   const params = useParams();
-  const reportMatch = useMatch("/Evidence/report/:candidateId");
+  const evidenceReportMatch = useMatch("/Evidence/report/:candidateId");
+  const allEvidenceReportMatch = useMatch("/AllEvidence/report/:candidateId");
+  const reportMatch = evidenceReportMatch || allEvidenceReportMatch;
   const reportCandidateId = Number(reportMatch?.params.candidateId);
   const candidateId = Number(params.candidateId ?? params.userId);
 
@@ -17,7 +23,7 @@ const EvidencePage = () => {
     return <EvidenceDetailsPage userId={candidateId} />;
   }
 
-  return <CandidateEvidenceList />;
+  return <CandidateEvidenceList mode={evidenceMode} />;
 };
 
 export default EvidencePage;

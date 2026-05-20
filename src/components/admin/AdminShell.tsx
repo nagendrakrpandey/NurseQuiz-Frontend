@@ -37,6 +37,7 @@ const adminRouteById: Record<string, string> = {
   payments: "/Payment",
   quiz: "/Question",
   "manage-exam": "/Evidence",
+  "all-evidence": "/AllEvidence",
   leaderboard: "/admin?tab=leaderboard",
   communication: "/admin?tab=communication",
 };

@@ -202,6 +202,7 @@ const PaymentsTab = () => {
   const [filteredPayments, setFilteredPayments] = useState<PaymentData[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
+  const [dateFilter, setDateFilter] = useState("all");
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(10);
   const [stats, setStats] = useState<PaymentStats>({
@@ -228,7 +229,23 @@ const PaymentsTab = () => {
     // Filter payments based on search term
     const filtered = sortPaymentsNewestFirst(payments.filter(payment => {
       const searchLower = searchTerm.toLowerCase();
-      return (
+      const paymentDate = getPaymentDate(payment);
+      const now = new Date();
+      const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const timestamp = paymentDate?.getTime() || 0;
+      const quarterStartMonth = Math.floor(now.getMonth() / 3) * 3;
+      const quarterStart = new Date(now.getFullYear(), quarterStartMonth, 1).getTime();
+      const yearStart = new Date(now.getFullYear(), 0, 1).getTime();
+      const withinDateFilter =
+        dateFilter === "all" ||
+        (dateFilter === "today" && timestamp >= startOfToday) ||
+        (dateFilter === "7d" && timestamp >= startOfToday - 6 * 24 * 60 * 60 * 1000) ||
+        (dateFilter === "30d" && timestamp >= startOfToday - 29 * 24 * 60 * 60 * 1000) ||
+        (dateFilter === "quarter" && timestamp >= quarterStart) ||
+        (dateFilter === "6m" && timestamp >= new Date(now.getFullYear(), now.getMonth() - 6, now.getDate()).getTime()) ||
+        (dateFilter === "year" && timestamp >= yearStart);
+
+      return withinDateFilter && (
         (payment.paymentId?.toLowerCase().includes(searchLower) || false) ||
         (payment.orderId?.toLowerCase().includes(searchLower) || false) ||
         (payment.organizationName?.toLowerCase().includes(searchLower) || false) ||
@@ -242,7 +259,7 @@ const PaymentsTab = () => {
     }));
     setFilteredPayments(filtered);
     setCurrentPage(1);
-  }, [searchTerm, payments]);
+  }, [searchTerm, dateFilter, payments]);
 
   const showToast = (type: string, message: string) => {
     setToast({ type, message });
@@ -573,39 +590,72 @@ const PaymentsTab = () => {
     }
   };
 
-  const exportToCSV = () => {
+  const getExportRows = () => filteredPayments.map(p => [
+    p.organizationName || p.organization?.organizationName || 'N/A',
+    formatAmount(p.amount),
+    p.paymentId || p.orderId || 'N/A',
+    formatDateOnly(p),
+    p.status || 'N/A'
+  ]);
+
+  const exportPayments = (format: "csv" | "excel" | "pdf") => {
     setExportLoading(true);
 
     try {
       const headers = [
-        'Payment ID',
-        'Order ID',
-        'Amount',
-        'Status',
-        'Organization',
-        'Date',
-        'Time'
+        'Organization Name',
+        'Amount received',
+        'Transaction ID',
+        'Date of payment',
+        'Status of payment'
       ];
+      const exportRows = getExportRows();
+      const today = new Date().toISOString().split('T')[0];
 
-      const csvData = filteredPayments.map(p => [
-        p.paymentId || 'N/A',
-        p.orderId || 'N/A',
-        p.amount || 0,
-        p.status || 'N/A',
-        p.organizationName || p.organization?.organizationName || 'N/A',
-        formatDateOnly(p),
-        formatTimeOnly(p)
-      ]);
+      if (format === "pdf") {
+        const tableRows = exportRows
+          .map((row) => `<tr>${row.map((value) => `<td>${String(value).replace(/</g, "&lt;")}</td>`).join("")}</tr>`)
+          .join("");
+        const html = `
+          <html>
+            <head>
+              <title>Transaction Report</title>
+              <style>
+                body { font-family: Arial, sans-serif; padding: 24px; }
+                h1 { font-size: 22px; }
+                table { border-collapse: collapse; width: 100%; font-size: 12px; }
+                th, td { border: 1px solid #d1d5db; padding: 8px; text-align: left; }
+                th { background: #f3f4f6; }
+              </style>
+            </head>
+            <body>
+              <h1>Transaction Report</h1>
+              <table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join("")}</tr></thead><tbody>${tableRows}</tbody></table>
+            </body>
+          </html>`;
+        const printWindow = window.open("", "_blank");
+        if (!printWindow) throw new Error("Pop-up blocked");
+        printWindow.document.write(html);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.print();
+        showToast("success", "PDF report opened for download.");
+        return;
+      }
+
+      const csvData = exportRows;
 
       const csvContent = [headers, ...csvData]
         .map(row => row.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))
         .join('\n');
 
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const blob = new Blob([csvContent], {
+        type: format === "excel" ? 'application/vnd.ms-excel;charset=utf-8;' : 'text/csv;charset=utf-8;'
+      });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `payments_${new Date().toISOString().split('T')[0]}.csv`;
+      a.download = `transactions_${today}.${format === "excel" ? "xls" : "csv"}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -765,11 +815,24 @@ const PaymentsTab = () => {
           <h2 className="text-2xl font-bold text-gray-900">Payment Analytics</h2>
           <p className="text-gray-500 mt-1">Track and manage all payment transactions</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-2">
+          <select
+            value={dateFilter}
+            onChange={(event) => setDateFilter(event.target.value)}
+            className="h-10 rounded-md border border-gray-200 bg-white px-3 text-sm"
+          >
+            <option value="all">All dates</option>
+            <option value="today">Today</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="quarter">This quarter</option>
+            <option value="6m">6 months</option>
+            <option value="year">This year</option>
+          </select>
           <Button
             variant="outline"
             className="gap-2"
-            onClick={exportToCSV}
+            onClick={() => exportPayments("csv")}
             disabled={exportLoading || filteredPayments.length === 0}
           >
             {exportLoading ? (
@@ -777,7 +840,25 @@ const PaymentsTab = () => {
             ) : (
               <Download className="h-4 w-4" />
             )}
-            Export Report
+            CSV
+          </Button>
+          <Button
+            variant="outline"
+            className="gap-2"
+            onClick={() => exportPayments("excel")}
+            disabled={exportLoading || filteredPayments.length === 0}
+          >
+            <Download className="h-4 w-4" />
+            Excel
+          </Button>
+          <Button
+            variant="outline"
+            className="gap-2"
+            onClick={() => exportPayments("pdf")}
+            disabled={exportLoading || filteredPayments.length === 0}
+          >
+            <Printer className="h-4 w-4" />
+            PDF
           </Button>
           <Button
             variant="outline"
@@ -980,35 +1061,31 @@ const PaymentsTab = () => {
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr className="border-b border-gray-200">
+                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Organization Name</th>
+                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Amount received</th>
                       <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Transaction ID</th>
-                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Organization</th>
-                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Amount</th>
-                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
-                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Time</th>
+                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Date of payment</th>
+                      <th className="text-left p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status of payment</th>
                       <th className="text-right p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {currentItems.map((payment) => (
                       <tr key={payment.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                        <td className="p-3 text-sm font-mono text-gray-600">
-                          {payment.paymentId ? payment.paymentId.slice(0, 12) + '...' : 'N/A'}
-                        </td>
                         <td className="p-3 text-sm font-medium text-gray-900">
                           {payment.organizationName || payment.organization?.organizationName || 'N/A'}
                         </td>
                         <td className="p-3 text-sm font-semibold text-gray-900">
                           {formatAmount(payment.amount)}
                         </td>
-                        <td className="p-3">
-                          {getStatusBadge(payment.status)}
+                        <td className="p-3 text-sm font-mono text-gray-600">
+                          {payment.paymentId || payment.orderId || 'N/A'}
                         </td>
                         <td className="p-3 text-sm text-gray-500">
                           {formatDateOnly(payment)}
                         </td>
-                        <td className="p-3 text-sm text-gray-500">
-                          {formatTimeOnly(payment)}
+                        <td className="p-3">
+                          {getStatusBadge(payment.status)}
                         </td>
                         <td className="p-3 text-right">
                           <div className="flex justify-end gap-2">

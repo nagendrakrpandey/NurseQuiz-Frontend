@@ -1,15 +1,19 @@
+import { BASE_URL } from "@/Service/api";
+
 export const PNG_MIME_TYPE = "image/png";
 export const JPEG_MIME_TYPE = "image/jpeg";
 
-const MP4_MIME_TYPES = [
-  "video/mp4;codecs=h264,aac",
-  "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
-  "video/mp4",
-];
-
 const WEBM_MIME_TYPES = [
+  "video/webm;codecs=vp8,opus",
+  "video/webm;codecs=vp9,opus",
   "video/webm;codecs=vp9",
   "video/webm;codecs=vp8",
+  "video/webm",
+];
+
+const VIDEO_MIME_TYPES_WITH_AUDIO = [
+  "video/webm;codecs=vp8,opus",
+  "video/webm;codecs=vp9,opus",
   "video/webm",
 ];
 
@@ -37,6 +41,77 @@ interface UploadEvidenceMediaOptions {
   fileName: string;
   meta: EvidenceUploadMeta;
 }
+
+const STORED_FILE_PATTERN = /\.(pdf|png|jpe?g|webp|gif|mp4|webm|mov|avi|mkv|zip)(?:[?#].*)?$/i;
+const PREVIEW_ENDPOINT_PATH = "/api/register/preview-file";
+
+const isInlineBrowserUrl = (value: string) => /^(blob:|data:)/i.test(value);
+
+const isStoredFileName = (value: string) =>
+  STORED_FILE_PATTERN.test(value) && !value.includes("/") && !value.includes("\\");
+
+export const normalizeBackendUploadPath = (value: unknown, fallbackFolder?: string) => {
+  if (typeof value !== "string" || !value.trim()) return "";
+
+  const normalizedValue = value.trim().replace(/\\/g, "/");
+  if (!normalizedValue || isInlineBrowserUrl(normalizedValue)) return normalizedValue;
+
+  if (/^https?:/i.test(normalizedValue)) {
+    try {
+      const parsed = new URL(normalizedValue);
+      const uploadsIndex = parsed.pathname.indexOf("/uploads/");
+      if (uploadsIndex >= 0) {
+        return `uploads/${decodeURIComponent(parsed.pathname.slice(uploadsIndex + "/uploads/".length))}`;
+      }
+
+      return "";
+    } catch {
+      return "";
+    }
+  }
+
+  const previewIndex = normalizedValue.indexOf(PREVIEW_ENDPOINT_PATH);
+  if (previewIndex >= 0) return "";
+
+  const uploadsIndex = normalizedValue.indexOf("uploads/");
+  if (uploadsIndex >= 0) return normalizedValue.slice(uploadsIndex).replace(/^\/+/, "");
+
+  if (normalizedValue.startsWith("/uploads/")) {
+    return normalizedValue.replace(/^\/+/, "");
+  }
+
+  if (isStoredFileName(normalizedValue)) {
+    const cleanFolder = typeof fallbackFolder === "string"
+      ? fallbackFolder.trim().replace(/^\/+|\/+$/g, "")
+      : "";
+    return cleanFolder ? `uploads/${cleanFolder}/${normalizedValue}` : `uploads/${normalizedValue}`;
+  }
+
+  return normalizedValue.replace(/^\/+/, "");
+};
+
+export const buildBackendFilePreviewUrl = (value: unknown, fallbackFolder?: string) => {
+  if (typeof value !== "string" || !value.trim()) return null;
+
+  const normalizedValue = value.trim().replace(/\\/g, "/");
+  if (isInlineBrowserUrl(normalizedValue)) return normalizedValue;
+
+  if (/^https?:/i.test(normalizedValue)) {
+    const uploadPath = normalizeBackendUploadPath(normalizedValue, fallbackFolder);
+    return uploadPath
+      ? `${BASE_URL}${PREVIEW_ENDPOINT_PATH}?path=${encodeURIComponent(uploadPath)}`
+      : normalizedValue;
+  }
+
+  if (normalizedValue.startsWith(PREVIEW_ENDPOINT_PATH)) {
+    return `${BASE_URL}${normalizedValue}`;
+  }
+
+  const uploadPath = normalizeBackendUploadPath(normalizedValue, fallbackFolder);
+  return uploadPath
+    ? `${BASE_URL}${PREVIEW_ENDPOINT_PATH}?path=${encodeURIComponent(uploadPath)}`
+    : null;
+};
 
 const buildStorageFormat = (mimeType: string) => {
   return getFileExtensionFromMimeType(mimeType);
@@ -78,16 +153,19 @@ export const getFileExtensionFromMimeType = (mimeType: string) => {
   return "bin";
 };
 
-export const getPreferredVideoMimeType = () => {
+export const getPreferredVideoMimeType = (requireAudio = false) => {
   if (typeof MediaRecorder === "undefined") {
-    return MP4_MIME_TYPES[MP4_MIME_TYPES.length - 1];
+    return requireAudio ? VIDEO_MIME_TYPES_WITH_AUDIO[0] : WEBM_MIME_TYPES[WEBM_MIME_TYPES.length - 1];
   }
 
-  const supportedMimeType = [...MP4_MIME_TYPES, ...WEBM_MIME_TYPES].find((mimeType) =>
+  const candidateMimeTypes = requireAudio
+    ? VIDEO_MIME_TYPES_WITH_AUDIO
+    : WEBM_MIME_TYPES;
+  const supportedMimeType = candidateMimeTypes.find((mimeType) =>
     MediaRecorder.isTypeSupported(mimeType)
   );
 
-  return supportedMimeType || MP4_MIME_TYPES[MP4_MIME_TYPES.length - 1];
+  return supportedMimeType || "";
 };
 
 export const blobToDataUrl = (blob: Blob) =>

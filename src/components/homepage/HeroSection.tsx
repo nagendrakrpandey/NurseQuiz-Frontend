@@ -36,7 +36,7 @@ const HeroSection = () => (
           </div>
 
           <h1 className="max-w-4xl text-4xl font-black leading-[1.04] tracking-normal text-white sm:text-5xl lg:text-6xl xl:text-7xl">
-            National Nursing Excellence Quiz
+            Regional Nursing Excellence Quiz
           </h1>
 
           <p className="mt-5 max-w-2xl text-base leading-7 text-slate-200 sm:text-lg">

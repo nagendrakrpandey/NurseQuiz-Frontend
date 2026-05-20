@@ -185,7 +185,7 @@ const fetchBatchById = async (batchId: number) => {
   if (!response.ok || !Object.keys(batch).length || asRecord(payload).success === false) {
     return {
       batch: null,
-      message: String(asRecord(payload).message || "Unable to load batch details."),
+      message: String(asRecord(payload).message || "Unable to load exam details."),
     };
   }
 
@@ -223,7 +223,7 @@ const resolveBatchFromEnrollment = async () => {
       storedCandidate.level ||
       storedUser.currentStage,
   ) || "district";
-  const levels = Array.from(new Set([levelHint, "district", "state", "national"]));
+  const levels = Array.from(new Set([levelHint, "district", "regional", "state", "national"]));
 
   const matches: Array<{
     batch: BatchRecord;
@@ -475,10 +475,10 @@ const textDictionary = {
   tooEarlyMessage: "You are too early. Your exam starts from",
   timePassedMessage: "You are late. Your exam time is passed.",
   datePassedMessage: "You are late. Your exam date is passed.",
-  batchMissing: "Batch details not found. Please start the exam from your dashboard.",
-  invalidBatchLink: "Invalid batch link. Please start the exam from your dashboard.",
+  batchMissing: "Exam details not found. Please start the exam from your dashboard.",
+  invalidBatchLink: "Invalid exam link. Please start the exam from your dashboard.",
   goToDashboard: "Go to Dashboard",
-  scheduleMissing: "Exam start date/time or end date/time is not configured for this batch.",
+  scheduleMissing: "Exam start date/time or end date/time is not configured for this exam.",
   scheduleVerifyFailed: "Unable to verify exam schedule. Please try again."
 };
 
@@ -622,7 +622,7 @@ export default function PreExamCheck() {
 
       return { allowed: true, title: "", message: "" };
     } catch (error) {
-      console.error("Batch schedule verification failed:", error);
+      console.error("Exam schedule verification failed:", error);
       return {
         allowed: false,
         title: t.examScheduleError,
@@ -765,9 +765,11 @@ export default function PreExamCheck() {
 
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: 48000 },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
         } 
       });
       
@@ -968,9 +970,15 @@ useEffect(() => {
       return;
     }
 
-    localStorage.removeItem(EXAM_PRECHECK_DONE_KEY);
-    localStorage.removeItem(EXAM_INSTRUCTION_DONE_KEY);
+    localStorage.setItem(EXAM_PRECHECK_DONE_KEY, "true");
     sessionStorage.setItem(EXAM_PRECHECK_DONE_KEY, "true");
+
+    if (localStorage.getItem(EXAM_INSTRUCTION_DONE_KEY) === "true") {
+      sessionStorage.setItem(EXAM_INSTRUCTION_DONE_KEY, "true");
+      navigate(`/Exam${window.location.search || ""}`);
+      return;
+    }
+
     sessionStorage.removeItem(EXAM_INSTRUCTION_DONE_KEY);
     navigate(`/instruction${window.location.search || ""}`);
   };

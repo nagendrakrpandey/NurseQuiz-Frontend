@@ -1,7 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Calendar,
-  CheckCircle2,
   CreditCard,
   FileQuestion,
   LayoutDashboard,
@@ -24,10 +23,9 @@ export interface AdminNavItem {
 export const adminNavItems: AdminNavItem[] = [
   { icon: LayoutDashboard, label: "Overview", id: "overview", color: "emerald" },
   { icon: Users, label: "Registrations", id: "registrations", color: "blue" },
-  { icon: CheckCircle2, label: "Approvals", id: "approvals", color: "amber" },
   { icon: CreditCard, label: "Payments", id: "payments", color: "purple" },
   { icon: FileQuestion, label: "Quiz Management", id: "quiz", color: "indigo" },
-  { icon: Calendar, label: "Candidate Evidence", id: "manage-exam", color: "rose" },
+  { icon: Calendar, label: "Exam Evidence", id: "manage-exam", color: "rose" },
   { icon: Trophy, label: "Leaderboard", id: "leaderboard", color: "orange" },
   // { icon: Mail, label: "Communication", id: "communication", color: "cyan" },
 ];

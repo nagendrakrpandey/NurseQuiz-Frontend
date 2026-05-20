@@ -40,7 +40,7 @@ const LeaderboardPage = () => (
             <SelectContent>
               <SelectItem value="district">District</SelectItem>
               <SelectItem value="state">State</SelectItem>
-              <SelectItem value="national">Regional</SelectItem>
+              <SelectItem value="regional">Regional</SelectItem>
             </SelectContent>
           </Select>
         </div>

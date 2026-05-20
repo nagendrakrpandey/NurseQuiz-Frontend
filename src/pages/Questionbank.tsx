@@ -19,7 +19,7 @@ import {
   CheckCircle, XCircle, AlertCircle, Loader2, Download,
   FileJson, FileSpreadsheet, HelpCircle, Sparkles, Settings,
   Video, Camera, Shield, Monitor, UserPlus, BookOpen,
-  BarChart3, Mail, Phone, Search, Filter, ChevronRight,
+  BarChart3, Mail, Phone, Search, Filter,
   Activity, Target, Zap, Star, TrendingDown, Percent,
   Briefcase, GraduationCap, FileText, Send, Gift, Heart, RefreshCw,
   X, AlertTriangle, Fingerprint, BookMarked, Link2
@@ -281,20 +281,20 @@ const QuizManagementTab = () => {
       description: "Foundation & Core Competencies",
     },
     {
+      qb_id: "regional",
+      name: "Regional Level",
+      icon: Crown,
+      gradient: "linear-gradient(135deg, #fa709a 0%, #fee140 100%)",
+      color: "#fa709a",
+      description: "Expert Leadership Track",
+    },
+    {
       qb_id: "state",
       name: "State Level",
       icon: Trophy,
       gradient: "linear-gradient(135deg, #f093fb 0%, #f5576c 100%)",
       color: "#f5576c",
       description: "Advanced Professional Skills",
-    },
-    {
-      qb_id: "national",
-      name: "Regional Level",
-      icon: Crown,
-      gradient: "linear-gradient(135deg, #fa709a 0%, #fee140 100%)",
-      color: "#fa709a",
-      description: "Expert Leadership Track",
     }
   ];
 
@@ -437,8 +437,7 @@ const QuizManagementTab = () => {
 
     if (normalized.includes("district")) return "district";
     if (normalized.includes("state")) return "state";
-    if (normalized.includes("regional") || normalized.includes("region")) return "national";
-    if (normalized.includes("national")) return "national";
+    if (normalized.includes("regional") || normalized.includes("region") || normalized.includes("national")) return "regional";
 
     return "";
   };
@@ -1154,8 +1153,8 @@ const QuizManagementTab = () => {
               batch_id: savedBatchId,
             });
           } catch (linkError) {
-            console.warn("Batch created, but question bank link refresh failed:", linkError);
-            setError("Batch created, but question bank link could not be confirmed.");
+            console.warn("Exam created, but question bank link refresh failed:", linkError);
+            setError("Exam created, but question bank link could not be confirmed.");
           }
         }
 
@@ -1165,8 +1164,8 @@ const QuizManagementTab = () => {
       }
       return false;
     } catch (err) {
-      console.error("Error creating batch:", err);
-      setError("Failed to create batch");
+      console.error("Error creating exam:", err);
+      setError("Failed to create exam");
       return false;
     }
   };
@@ -1192,8 +1191,8 @@ const QuizManagementTab = () => {
       }
       return false;
     } catch (err) {
-      console.error("Error updating batch:", err);
-      setError("Failed to update batch");
+      console.error("Error updating exam:", err);
+      setError("Failed to update exam");
       return false;
     }
   };
@@ -1213,13 +1212,13 @@ const QuizManagementTab = () => {
           setSelectedBatch(null);
           setQuestions([]);
         }
-        showSuccess("Success", "Batch deleted successfully!");
+        showSuccess("Success", "Exam deleted successfully!");
         return true;
       }
       return false;
     } catch (err) {
-      console.error("Error deleting batch:", err);
-      setError("Failed to delete batch");
+      console.error("Error deleting exam:", err);
+      setError("Failed to delete exam");
       return false;
     }
   };
@@ -1367,7 +1366,7 @@ const QuizManagementTab = () => {
 
   const enrollCandidate = async (candidate: any, batchId: number) => {
     if (!batchId) {
-      showAlert("Validation Error", "Please select a batch first");
+      showAlert("Validation Error", "Please select an exam first");
       return false;
     }
 
@@ -1380,7 +1379,7 @@ const QuizManagementTab = () => {
     if (exists) {
       showAlert(
         "Duplicate Candidate",
-        "Candidate with this email or enrollment number already exists in this batch!"
+        "Candidate with this email or enrollment number already exists in this exam!"
       );
       return false;
     }
@@ -1432,7 +1431,7 @@ const QuizManagementTab = () => {
 
   const bulkEnrollCandidates = async (candidates: any[], batchId: number) => {
     if (!batchId) {
-      showAlert("Validation Error", "Please select a batch first");
+      showAlert("Validation Error", "Please select an exam first");
       return false;
     }
 
@@ -1550,7 +1549,7 @@ const QuizManagementTab = () => {
         );
         await fetchBatches(activeLevel);
         await fetchLevelSummaries();
-        showSuccess("Success", "Batch linked to question bank successfully!");
+        showSuccess("Success", "Exam linked to question bank successfully!");
         return true;
       }
       return false;
@@ -1592,6 +1591,48 @@ const QuizManagementTab = () => {
   const getTodayDate = () => {
     const today = new Date();
     return today.toISOString().split('T')[0];
+  };
+
+  const parseDateInput = (value: string) => {
+    const [year, month, day] = value.split("-").map(Number);
+    if (!year || !month || !day) return null;
+
+    const parsedDate = new Date(year, month - 1, day);
+    if (
+      parsedDate.getFullYear() !== year ||
+      parsedDate.getMonth() !== month - 1 ||
+      parsedDate.getDate() !== day
+    ) {
+      return null;
+    }
+
+    parsedDate.setHours(0, 0, 0, 0);
+    return parsedDate;
+  };
+
+  const getTimeMinutes = (value: string) => {
+    const [hours, minutes] = value.split(":").map(Number);
+    if (
+      !Number.isFinite(hours) ||
+      !Number.isFinite(minutes) ||
+      hours < 0 ||
+      hours > 23 ||
+      minutes < 0 ||
+      minutes > 59
+    ) {
+      return null;
+    }
+
+    return hours * 60 + minutes;
+  };
+
+  const buildBatchDateTime = (dateValue: string, timeValue: string) => {
+    const parsedDate = parseDateInput(dateValue);
+    const timeMinutes = getTimeMinutes(timeValue);
+    if (!parsedDate || timeMinutes === null) return null;
+
+    parsedDate.setHours(Math.floor(timeMinutes / 60), timeMinutes % 60, 0, 0);
+    return parsedDate;
   };
 
   // Form handlers
@@ -1636,7 +1677,7 @@ const QuizManagementTab = () => {
 
   const handleBatchSubmit = async () => {
     if (!batchFormData.batchCode?.trim()) {
-      showAlert("Validation Error", "Batch Code is required");
+      showAlert("Validation Error", "Exam Code is required");
       return;
     }
 
@@ -1667,24 +1708,37 @@ const QuizManagementTab = () => {
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const startDateObj = new Date(batchFormData.start_date);
-    startDateObj.setHours(0, 0, 0, 0);
+    const startDateObj = parseDateInput(batchFormData.start_date);
+    const endDateObj = parseDateInput(batchFormData.end_date);
+    const startTimeMinutes = getTimeMinutes(batchFormData.start_time);
+    const endTimeMinutes = getTimeMinutes(batchFormData.end_time);
+
+    if (!startDateObj || !endDateObj || startTimeMinutes === null || endTimeMinutes === null) {
+      showAlert("Validation Error", "Invalid date/time format");
+      return;
+    }
 
     if (startDateObj < today) {
       showAlert("Validation Error", "Start date cannot be in the past. Please select today or a future date.");
       return;
     }
 
-    const startDateTime = new Date(`${batchFormData.start_date}T${batchFormData.start_time}`);
-    const endDateTime = new Date(`${batchFormData.end_date}T${batchFormData.end_time}`);
-
-    if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
-      showAlert("Validation Error", "Invalid date/time format");
+    if (endDateObj < startDateObj) {
+      showAlert("Validation Error", "End date must be on or after start date");
       return;
     }
 
-    if (startDateTime >= endDateTime) {
-      showAlert("Validation Error", "End date/time must be greater than start date/time");
+    const sameExamDate = endDateObj.getTime() === startDateObj.getTime();
+    if (sameExamDate && endTimeMinutes <= startTimeMinutes) {
+      showAlert("Validation Error", "End time must be greater than start time when start and end date are same");
+      return;
+    }
+
+    const startDateTime = buildBatchDateTime(batchFormData.start_date, batchFormData.start_time);
+    const endDateTime = buildBatchDateTime(batchFormData.end_date, batchFormData.end_time);
+
+    if (!startDateTime || !endDateTime) {
+      showAlert("Validation Error", "Invalid date/time format");
       return;
     }
 
@@ -1705,7 +1759,7 @@ const QuizManagementTab = () => {
     try {
       const editingBatchId = getBatchId(editingBatch);
       if (editingBatch && !editingBatchId) {
-        showAlert("Validation Error", "Batch ID is missing");
+        showAlert("Validation Error", "Exam ID is missing");
         return;
       }
 
@@ -1714,11 +1768,11 @@ const QuizManagementTab = () => {
         : await createBatch(payload);
 
       if (success) {
-        showSuccess("Success", editingBatch ? "Batch updated successfully!" : "Batch created successfully!");
+        showSuccess("Success", editingBatch ? "Exam updated successfully!" : "Exam created successfully!");
         setShowBatchDialog(false);
         resetBatchForm();
       } else {
-        showAlert("Error", "Failed to save batch");
+        showAlert("Error", "Failed to save exam");
       }
 
     } catch (err) {
@@ -1804,7 +1858,7 @@ const QuizManagementTab = () => {
 
     const selectedBatchId = getBatchId(selectedBatch);
     if (!selectedBatchId) {
-      showAlert("Validation Error", "Please select a batch first");
+      showAlert("Validation Error", "Please select an exam first");
       return;
     }
 
@@ -1825,7 +1879,7 @@ const QuizManagementTab = () => {
 
     const selectedBatchId = getBatchId(selectedBatch);
     if (!selectedBatchId) {
-      showAlert("Validation Error", "Please select a batch first");
+      showAlert("Validation Error", "Please select an exam first");
       return;
     }
 
@@ -2019,7 +2073,7 @@ const QuizManagementTab = () => {
   };
 
   const handleDeleteBatch = (batchId: number) => {
-    showAlert("Confirm Delete", "Are you sure you want to delete this batch?", () => {
+    showAlert("Confirm Delete", "Are you sure you want to delete this exam?", () => {
       deleteBatch(batchId);
       setAlertDialog({ ...alertDialog, open: false });
     });
@@ -2204,7 +2258,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
           <p className="text-sm opacity-90 relative z-10">{level.description}</p>
           <div className="flex gap-3 mt-4 relative z-10">
             <div className="bg-white/20 px-3 py-1 rounded-full text-xs font-medium">
-              {summary.batches} Batches
+              {summary.batches} Exams
             </div>
             <div className="bg-white/20 px-3 py-1 rounded-full text-xs font-medium">
               {summary.candidates} Students
@@ -2303,34 +2357,6 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
             <Clock className="h-4 w-4 text-gray-400" />
             <span className="truncate">{batch.start_time || '--'} - {batch.end_time || '--'}</span>
           </div>
-        </div>
-
-        <div className="flex flex-wrap gap-2 pt-3 border-t border-gray-100">
-          {batch.random_photo && (
-            <Badge variant="secondary" className="gap-1 bg-gray-100">
-              <Camera className="h-3 w-3" /> Photo
-            </Badge>
-          )}
-          {batch.random_video && (
-            <Badge variant="secondary" className="gap-1 bg-gray-100">
-              <Video className="h-3 w-3" /> Video
-            </Badge>
-          )}
-          {batch.ai_monitoring && (
-            <Badge variant="secondary" className="gap-1 bg-gray-100">
-              <Shield className="h-3 w-3" /> AI Proctor
-            </Badge>
-          )}
-          {batch.tab_switch_detection && (
-            <Badge variant="secondary" className="gap-1 bg-gray-100">
-              <Monitor className="h-3 w-3" /> Tab Guard ({batch.max_tab_switches} max)
-            </Badge>
-          )}
-          {batch.auto_submit_on_tab_switch && (
-            <Badge variant="secondary" className="gap-1 bg-red-50 text-red-700">
-              <AlertTriangle className="h-3 w-3" /> Auto-submit
-            </Badge>
-          )}
         </div>
       </div>
     </motion.div>
@@ -2488,7 +2514,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
           className="mb-6 lg:mb-8"
         >
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-gray-500 sm:text-base">Manage question banks, batches, and candidates efficiently</p>
+                    <p className="text-sm text-gray-500 sm:text-base">Manage question banks, exams, and candidates efficiently</p>
             <div className="flex w-full gap-3 sm:w-auto">
               <Button
                 variant="outline"
@@ -2566,7 +2592,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                     className="whitespace-nowrap px-3 text-xs transition-all duration-300 data-[state=active]:bg-gradient-to-r data-[state=active]:from-emerald-500 data-[state=active]:to-teal-600 data-[state=active]:text-white sm:text-sm"
                   >
                     <Calendar className="h-4 w-4 mr-2" />
-                    Batches
+                    Exams
                   </TabsTrigger>
                 </TabsList>
               </div>
@@ -2581,7 +2607,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                 >
 
                   <StatCard
-                    title="Total Batches"
+                    title="Total Exams"
                     value={stats.totalBatches}
                     icon={Briefcase}
                     trend="+12%"
@@ -2597,7 +2623,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                   />
 
                   <StatCard
-                    title="Active Batches"
+                    title="Active Exams"
                     value={stats.activeBatches}
                     icon={Activity}
                     trend="+5%"
@@ -2623,18 +2649,17 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                     <CardContent>
                       <div className="space-y-4">
                         {batches.slice(0, 3).map((batch, idx) => (
-                          <div key={idx} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                            <div>
+                          <div key={idx} className="rounded-lg bg-gray-50 p-3">
+                            <div className="min-w-0">
                               <p className="font-medium text-gray-900">{batch.batchCode}</p>
                               <p className="text-sm text-gray-500">
                                 {batch.enrolled_students || 0} candidates enrolled
                               </p>
                             </div>
-                            <ChevronRight className="h-5 w-5 text-gray-400" />
                           </div>
                         ))}
                         {batches.length === 0 && (
-                          <p className="text-gray-500 text-center py-4">No batches created yet</p>
+                          <p className="text-gray-500 text-center py-4">No exams created yet</p>
                         )}
                       </div>
                     </CardContent>
@@ -2651,17 +2676,23 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                     </h3>
                     <p className="text-gray-500 mt-1">Create and manage question banks for your examination</p>
                   </div>
-                  <Button
-                    onClick={() => {
-                      resetQuestionBankForm();
-                      setEditingQuestionBank(null);
-                      setShowQuestionBankDialog(true);
-                    }}
-                    className="w-full bg-gradient-to-r from-emerald-500 to-teal-600 shadow-lg transition-all duration-300 hover:from-emerald-600 hover:to-teal-700 hover:shadow-xl sm:w-auto"
-                  >
-                    <Plus className="h-4 w-4 mr-2" />
-                    Create Question Bank
-                  </Button>
+                  <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+                    <Button variant="outline" onClick={downloadQuestionTemplate} className="gap-2">
+                      <Download className="h-4 w-4" />
+                      Template
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        resetQuestionBankForm();
+                        setEditingQuestionBank(null);
+                        setShowQuestionBankDialog(true);
+                      }}
+                      className="w-full bg-gradient-to-r from-emerald-500 to-teal-600 shadow-lg transition-all duration-300 hover:from-emerald-600 hover:to-teal-700 hover:shadow-xl sm:w-auto"
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      Create Question Bank
+                    </Button>
+                  </div>
                 </div>
 
                 {loading && (
@@ -2729,125 +2760,15 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                   ))}
                 </motion.div>
 
-                <div className="rounded-xl border border-gray-100 bg-gray-50/70 p-4 sm:p-5">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <h4 className="text-lg font-semibold text-gray-900">Questions in Question Bank</h4>
-                      <p className="text-sm text-gray-500">
-                        {selectedQuestionBank
-                          ? `Managing questions for ${selectedQuestionBank.bankName}`
-                          : "Select a question bank to view, add, or bulk upload questions"}
-                      </p>
-                    </div>
-
-                    <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap lg:w-auto">
-                      <Select
-                        value={selectedQuestionBankId?.toString() || ""}
-                        onValueChange={(val) => {
-                          const bank = activeQuestionBanks.find(
-                            b => getQuestionBankId(b)?.toString() === val
-                          );
-
-                          setSelectedQuestionBank(bank || null);
-                          setSelectedBatch(null);
-                        }}
-                      >
-                        <SelectTrigger className="w-full sm:w-[260px]">
-                          <SelectValue placeholder="Select Question Bank" />
-                        </SelectTrigger>
-
-                        <SelectContent>
-                          {activeQuestionBanks
-                            .filter(bank => getQuestionBankId(bank) !== null)
-                            .map((bank) => {
-                              const bankId = getQuestionBankId(bank);
-
-                              return (
-                                <SelectItem key={bankId} value={bankId!.toString()}>
-                                  {bank.bankName} ({bank.totalQuestions || 0} Qs)
-                                </SelectItem>
-                              );
-                            })}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid w-full grid-cols-1 gap-3 sm:grid-cols-3 lg:w-auto">
-                    <Button variant="outline" onClick={downloadQuestionTemplate} className="w-full gap-2">
-                      <Download className="h-4 w-4" />
-                      Template
-                    </Button>
-
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        if (!selectedQuestionBank) {
-                          showAlert("Select Question Bank", "Please select a question bank first");
-                          return;
-                        }
-
-                        setShowBulkQuestionDialog(true);
-                      }}
-                      className="w-full gap-2"
-                    >
-                      <Upload className="h-4 w-4" />
-                      Bulk Upload
-                    </Button>
-
-                    <Button
-                      onClick={() => {
-                        if (!selectedQuestionBank) {
-                          showAlert("Select Question Bank", "Please select a question bank first");
-                          return;
-                        }
-
-                        resetQuestionForm();
-                        setEditingQuestion(null);
-                        setShowQuestionDialog(true);
-                      }}
-                      className="w-full bg-gradient-to-r from-emerald-500 to-teal-600"
-                    >
-                      <Plus className="h-4 w-4 mr-2" />
-                      Add Question
-                    </Button>
-                  </div>
-
-                  <div className="mt-4 space-y-4">
-                    {!selectedQuestionBank && (
-                      <Alert className="bg-amber-50 border-amber-200 text-amber-800">
-                        <AlertCircle className="h-4 w-4" />
-                        <AlertDescription>
-                          Please select a question bank above to view or add questions.
-                        </AlertDescription>
-                      </Alert>
-                    )}
-
-                    {selectedQuestionBank && !selectedBatch && (
-                      <Alert className="bg-blue-50 border-blue-200 text-blue-800">
-                        <BookOpen className="h-4 w-4" />
-                        <AlertDescription>
-                          Questions will be saved directly in <strong>{selectedQuestionBank.bankName}</strong>. Batch selection is not required.
-                        </AlertDescription>
-                      </Alert>
-                    )}
-
-                    {selectedQuestionBank && selectedBatch && (
-                      <Alert className="bg-emerald-50 border-emerald-200 text-emerald-800">
-                        <BookOpen className="h-4 w-4" />
-                        <AlertDescription>
-                          Viewing questions for batch <strong>{selectedBatch.batchCode}</strong>. New uploads still save to <strong>{selectedQuestionBank.bankName}</strong>.
-                        </AlertDescription>
-                      </Alert>
-                    )}
-
+                {selectedQuestionBank && (
+                  <div className="space-y-4">
                     {loading && (
                       <div className="flex justify-center py-12">
                         <Loader2 className="h-8 w-8 animate-spin text-emerald-600" />
                       </div>
                     )}
 
-                    {!loading && selectedQuestionBank && questions.length === 0 && (
+                    {!loading && questions.length === 0 && (
                       <div className="text-center py-12">
                         <Database className="h-16 w-16 mx-auto text-gray-300 mb-4" />
                         <h3 className="text-lg font-semibold text-gray-900 mb-2">No Questions Found</h3>
@@ -2893,7 +2814,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                       ))}
                     </motion.div>
                   </div>
-                </div>
+                )}
               </TabsContent>
 
               {/* Batches Tab */}
@@ -2901,9 +2822,9 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <h3 className="text-xl font-bold text-gray-900">
-                      {quizLevels.find(l => l.qb_id === activeLevel)?.name} Batches
+                      {quizLevels.find(l => l.qb_id === activeLevel)?.name} Exams
                     </h3>
-                    <p className="text-gray-500 mt-1">Manage and monitor all examination batches</p>
+                    <p className="text-gray-500 mt-1">Manage and monitor all exams</p>
                   </div>
                   <Button
                     onClick={() => {
@@ -2914,7 +2835,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                     className="w-full bg-gradient-to-r from-emerald-500 to-teal-600 shadow-lg transition-all duration-300 hover:from-emerald-600 hover:to-teal-700 hover:shadow-xl sm:w-auto"
                   >
                     <Plus className="h-4 w-4 mr-2" />
-                    Create New Batch
+                    Create New Exam
                   </Button>
                 </div>
 
@@ -2927,9 +2848,9 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                 {!loading && batches.length === 0 && (
                   <div className="text-center py-12">
                     <Calendar className="h-16 w-16 mx-auto text-gray-300 mb-4" />
-                    <h3 className="text-lg font-semibold text-gray-900 mb-2">No Batches Created</h3>
-                    <p className="text-gray-500 mb-4">Get started by creating your first examination batch</p>
-                    <Button onClick={() => setShowBatchDialog(true)}>Create Batch</Button>
+                    <h3 className="text-lg font-semibold text-gray-900 mb-2">No Exams Created</h3>
+                    <p className="text-gray-500 mb-4">Get started by creating your first exam</p>
+                    <Button onClick={() => setShowBatchDialog(true)}>Create Exam</Button>
                   </div>
                 )}
 
@@ -2961,7 +2882,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                       onManageQuestions={(b: Batch) => {
                         const linkedBankId = getBatchQuestionBankId(b);
                         if (!linkedBankId) {
-                          showAlert("Link Required", "Please link a question bank to this batch first");
+                          showAlert("Link Required", "Please link a question bank to this exam first");
                           setShowLinkBankDialog(true);
                           setSelectedBatch(b);
                           return;
@@ -3054,11 +2975,11 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
         </DialogContent>
       </Dialog>
 
-      {/* Link Bank to Batch Dialog */}
+      {/* Link Bank to Exam Dialog */}
       <Dialog open={showLinkBankDialog} onOpenChange={setShowLinkBankDialog}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Link Question Bank to Batch</DialogTitle>
+            <DialogTitle>Link Question Bank to Exam</DialogTitle>
             <DialogDescription>
               Select a question bank to link with {getBatchCode(selectedBatch)}
             </DialogDescription>
@@ -3107,23 +3028,23 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
         </DialogContent>
       </Dialog>
 
-      {/* Batch Dialog */}
+      {/* Exam Dialog */}
       <Dialog open={showBatchDialog} onOpenChange={setShowBatchDialog}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              {editingBatch ? "Edit Batch" : "Create New Batch"}
+              {editingBatch ? "Edit Exam" : "Create New Exam"}
             </DialogTitle>
             <DialogDescription>
-              {editingBatch ? "Update batch details" : `Create a new batch for ${activeLevel} level examination`}
+              {editingBatch ? "Update exam details" : `Create a new exam for ${activeLevel} level`}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
             <div>
-              <Label>Batch Code *</Label>
+              <Label>Exam Code *</Label>
               <Input
-                placeholder="e.g., DISTRICT_BATCH_001"
+                placeholder="e.g., DISTRICT_EXAM_001"
                 value={batchFormData.batchCode || ""}
                 onChange={(e) =>
                   setBatchFormData({ ...batchFormData, batchCode: e.target.value })
@@ -3213,7 +3134,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                 </Popover>
 
                 <p className="text-xs text-gray-500 mt-1">
-                  Select a question bank while creating this batch.
+                  Select a question bank while creating this exam.
                 </p>
               </div>
 
@@ -3263,95 +3184,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                     setBatchFormData({ ...batchFormData, end_time: e.target.value })
                   }
                 />
-              </div>
-            </div>
-
-            <div className="border-t pt-4">
-              <h4 className="font-medium mb-3">Security & Monitoring Settings</h4>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>AI Monitoring</Label>
-                    <p className="text-xs text-gray-500">AI-based proctoring for candidate monitoring</p>
-                  </div>
-                  <Switch
-                    checked={batchFormData.ai_monitoring}
-                    onCheckedChange={(val) =>
-                      setBatchFormData({ ...batchFormData, ai_monitoring: val })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>Tab Switch Detection</Label>
-                    <p className="text-xs text-gray-500">Detect when candidates switch tabs</p>
-                  </div>
-                  <Switch
-                    checked={batchFormData.tab_switch_detection}
-                    onCheckedChange={(val) =>
-                      setBatchFormData({ ...batchFormData, tab_switch_detection: val })
-                    }
-                  />
-                </div>
-
-                {batchFormData.tab_switch_detection && (
-                  <>
-                    <div>
-                      <Label>Max Tab Switches Allowed</Label>
-                      <Input
-                        type="number"
-                        min="1"
-                        max="10"
-                        value={batchFormData.max_tab_switches || 3}
-                        onChange={(e) =>
-                          setBatchFormData({ ...batchFormData, max_tab_switches: parseInt(e.target.value) || 3 })
-                        }
-                      />
-                      <p className="text-xs text-gray-500 mt-1">Number of tab switches allowed before action is taken</p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <Label>Auto-submit on Violation</Label>
-                        <p className="text-xs text-gray-500">Automatically submit exam when max tab switches exceeded</p>
-                      </div>
-                      <Switch
-                        checked={batchFormData.auto_submit_on_tab_switch}
-                        onCheckedChange={(val) =>
-                          setBatchFormData({ ...batchFormData, auto_submit_on_tab_switch: val })
-                        }
-                      />
-                    </div>
-                  </>
-                )}
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>Random Photo Capture</Label>
-                    <p className="text-xs text-gray-500">Capture random photos during exam</p>
-                  </div>
-                  <Switch
-                    checked={batchFormData.random_photo}
-                    onCheckedChange={(val) =>
-                      setBatchFormData({ ...batchFormData, random_photo: val })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>Random Video Capture</Label>
-                    <p className="text-xs text-gray-500">Capture random video clips during exam</p>
-                  </div>
-                  <Switch
-                    checked={batchFormData.random_video}
-                    onCheckedChange={(val) =>
-                      setBatchFormData({ ...batchFormData, random_video: val })
-                    }
-                  />
-                </div>
+                <p className="text-xs text-gray-500 mt-1">If end date is same, end time must be after start time</p>
               </div>
             </div>
           </div>
@@ -3533,18 +3366,18 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
         </DialogContent>
       </Dialog>
 
-      {/* Batch Details Dialog */}
+      {/* Exam Details Dialog */}
       <Dialog open={showBatchDetailsDialog} onOpenChange={setShowBatchDetailsDialog}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Batch Details</DialogTitle>
+            <DialogTitle>Exam Details</DialogTitle>
           </DialogHeader>
 
           {selectedBatchDetails && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
-                  <Label className="text-gray-500">Batch Code</Label>
+                  <Label className="text-gray-500">Exam Code</Label>
                   <p className="font-medium">{getBatchCode(selectedBatchDetails)}</p>
                 </div>
 
@@ -3611,25 +3444,6 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
                   <p>{getBatchQuestionCount(selectedBatchDetails)}</p>
                 </div>
               </div>
-
-              <div className="border-t pt-3">
-                <Label className="text-gray-500">Security Features</Label>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {selectedBatchDetails.ai_monitoring && <Badge>AI Monitoring</Badge>}
-                  {selectedBatchDetails.tab_switch_detection && (
-                    <Badge>
-                      Tab Detection ({selectedBatchDetails.max_tab_switches} max)
-                    </Badge>
-                  )}
-                  {selectedBatchDetails.auto_submit_on_tab_switch && (
-                    <Badge variant="destructive">
-                      Auto-submit on violation
-                    </Badge>
-                  )}
-                  {selectedBatchDetails.random_photo && <Badge>Random Photo</Badge>}
-                  {selectedBatchDetails.random_video && <Badge>Random Video</Badge>}
-                </div>
-              </div>
             </div>
           )}
 
@@ -3647,7 +3461,7 @@ Jane Smith,jane@example.com,9876543210,ENR002`;
               Candidates - {getBatchCode(selectedBatch)}
             </DialogTitle>
             <DialogDescription>
-              Manage candidates enrolled in this batch
+              Manage candidates enrolled in this exam
             </DialogDescription>
           </DialogHeader>
 

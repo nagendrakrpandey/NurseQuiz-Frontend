@@ -22,10 +22,10 @@ const AnnouncementsPage = () => (
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="hero-gradient rounded-xl p-5 text-primary-foreground sm:p-8">
           <div className="flex items-center gap-2 mb-4">
             <Megaphone className="h-5 w-5" />
-            <Badge className="bg-primary-foreground/20 text-primary-foreground border-0">National Finals</Badge>
+            <Badge className="bg-primary-foreground/20 text-primary-foreground border-0">Regional Finals</Badge>
           </div>
-          <h1 className="mb-2 font-heading text-2xl font-bold sm:text-3xl">National Level Grand Finale</h1>
-          <p className="text-primary-foreground/80 mb-6">The top 20 teams from across India compete for the national championship.</p>
+          <h1 className="mb-2 font-heading text-2xl font-bold sm:text-3xl">Regional Level Grand Finale</h1>
+          <p className="text-primary-foreground/80 mb-6">The top 20 teams compete for the regional championship.</p>
           <div className="flex flex-wrap gap-4 text-sm sm:gap-6">
             <div className="flex items-center gap-2"><Calendar className="h-4 w-4" /> June 20, 2026</div>
             <div className="flex min-w-0 items-center gap-2"><ExternalLink className="h-4 w-4 shrink-0" /> <span>AIIMS Auditorium, New Delhi</span></div>

@@ -7,7 +7,8 @@ interface RequireExamStepProps {
   children: ReactNode;
 }
 
-const hasStepFlag = (key: string) => sessionStorage.getItem(key) === "true";
+const hasStepFlag = (key: string) =>
+  sessionStorage.getItem(key) === "true" || localStorage.getItem(key) === "true";
 
 const RequireExamStep = ({ step, children }: RequireExamStepProps) => {
   const location = useLocation();

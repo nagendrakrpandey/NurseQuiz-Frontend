@@ -27,17 +27,38 @@ import path from "path";
 import { componentTagger } from "lovable-tagger";
 
 export default defineConfig(({ mode }) => ({
+  base: "/",
+
   server: {
-    host: true, // better than "::" for external access
+    host: "0.0.0.0",
     port: 8080,
-    allowedHosts: [
-      "amino-viability-clobber.ngrok-free.dev"
-    ],
     hmr: {
       overlay: false,
     },
+    proxy: {
+      "/uploads": {
+        target: "http://localhost:9090",
+        changeOrigin: true,
+        secure: false,
+      },
+    },
+    allowedHosts: [
+      "localhost",
+      "127.0.0.1",
+      "amino-viability-clobber.ngrok-free.dev"
+    ],
   },
-  plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
+
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+  },
+
+  plugins: [
+    react(),
+    mode === "development" && componentTagger()
+  ].filter(Boolean),
+
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

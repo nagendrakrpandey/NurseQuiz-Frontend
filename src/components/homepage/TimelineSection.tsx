@@ -6,7 +6,7 @@ const dates = [
   { date: "May 5 - May 10", title: "Verification", description: "Admin review, document checks, and approvals.", icon: CheckCircle2, status: "active" },
   { date: "May 15 - May 20", title: "District Quiz", description: "First online assessment round for approved teams.", icon: Timer, status: "upcoming" },
   { date: "Jun 1 - Jun 5", title: "State Quiz", description: "Top qualifying teams compete at state level.", icon: Trophy, status: "upcoming" },
-  { date: "Jun 20", title: "National Final", description: "Final round for the leading state performers.", icon: Flag, status: "upcoming" },
+  { date: "Jun 20", title: "Regional Final", description: "Final round for the leading state performers.", icon: Flag, status: "upcoming" },
   { date: "Jun 25", title: "Awards", description: "Certificates, rankings, and recognition published.", icon: Medal, status: "upcoming" },
 ];
 

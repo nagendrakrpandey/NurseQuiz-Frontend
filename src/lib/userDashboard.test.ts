@@ -9,7 +9,7 @@ import {
 const completedDashboard: DashboardResponse = {
   quizStatus: "COMPLETED",
   currentStage: "District",
-  competitionLevels: ["District", "State", "National"],
+  competitionLevels: ["District", "Regional", "State"],
 };
 
 describe("dashboard qualification", () => {
@@ -45,7 +45,7 @@ describe("dashboard qualification", () => {
     });
 
     const result = applyDashboardExamCompletionOverride(dashboard, 101);  
-    expect(result.currentStage).toBe("State");
+    expect(result.currentStage).toBe("Regional");
     expect(result.activeLevel).toBe(1);
     expect(result.certificates?.some((certificate) =>
       certificate.name?.includes("Qualification Certificate") &&

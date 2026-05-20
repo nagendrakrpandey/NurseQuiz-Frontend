@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ComponentType } from "react";
+import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   Activity,
@@ -39,7 +39,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { BASE_URL, BASE_URL1 } from "@/Service/api";
+import { BASE_URL1 } from "@/Service/api";
+import { buildBackendFilePreviewUrl } from "@/lib/evidenceMedia";
 
 type MediaType = "photo" | "video";
 
@@ -147,7 +148,7 @@ interface LegacyExamSession {
 }
 
 type DetailView = "evidence";
-type LevelOption = "state" | "district" | "national";
+type LevelOption = "district" | "regional" | "state";
 
 interface BatchOption {
   batch_id?: number;
@@ -175,14 +176,23 @@ interface CandidateListRow {
   batch_id?: number;
   batchCode?: string;
   status?: string;
+  examStatus?: string;
+  quizStatus?: string;
+  resultStatus?: string;
   score?: number | null;
 }
 
 interface EvidenceRouteState {
   candidate?: CandidateListRow;
   batch?: BatchOption;
+  level?: LevelOption;
+  batchId?: string | number;
   view?: DetailView;
   evidenceSummary?: Partial<EvidenceViewData>;
+  backState?: {
+    level?: LevelOption | "";
+    batchId?: string | number;
+  };
 }
 
 const createPlaceholderImage = (
@@ -241,7 +251,7 @@ const createEmptyEvidence = (sourceLabel: string): EvidenceViewData => ({
     submittedAt: null,
     theoryTimeSeconds: 0,
     tabSwitchCount: 0,
-    status: "in_progress",
+    status: "not_started",
     locationName: "Location not available",
     latitude: null,
     longitude: null,
@@ -710,6 +720,12 @@ const fetchJson = async (url: string) => {
   return result;
 };
 
+const getRowsFromPayload = (payload: unknown) => {
+  const data = unwrapApiData(payload);
+  return (Array.isArray(data) ? data : Array.isArray(payload) ? payload : [])
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object");
+};
+
 const getBatchId = (batch: BatchOption | null | undefined) => batch?.batch_id || batch?.id || null;
 const getBatchCode = (batch: BatchOption | null | undefined) => batch?.batchCode || batch?.batch_code || "";
 const getCandidateId = (candidate: CandidateListRow | null | undefined) => candidate?.candidate_id || candidate?.id || null;
@@ -737,13 +753,156 @@ const readField = (value: Record<string, unknown>, aliases: string[]) => {
   return matchedEntry?.[1];
 };
 
-const normalizeFileUrl = (value: unknown) => {
-  if (typeof value !== "string" || !value.trim()) return null;
+const isMeaningfulDisplayText = (value: unknown) => {
+  const text = String(value || "").trim();
+  return Boolean(text && !/^\d+$/.test(text));
+};
 
-  const url = value.trim().replace(/\\/g, "/");
-  if (url.startsWith("http") || url.startsWith("data:") || url.startsWith("blob:")) return url;
-  if (url.startsWith("/")) return `${BASE_URL}${url}`;
-  return `${BASE_URL}/${url}`;
+const readFiniteNumberField = (value: Record<string, unknown>, aliases: string[]) => {
+  const rawValue = readField(value, aliases);
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const latitudeAliases = ["latitude", "lat", "lattitude", "latitudeValue", "latitude_value"];
+const longitudeAliases = [
+  "longitude",
+  "lng",
+  "lon",
+  "long",
+  "lngitude",
+  "langitude",
+  "longitute",
+  "longitudeValue",
+  "longitude_value",
+];
+const locationNameAliases = ["locationName", "location_name", "locationname", "address", "location"];
+
+const deriveCandidateResponseOverview = (
+  payload: unknown,
+  fallback: EvidenceViewData["overview"]
+): EvidenceViewData["overview"] => {
+  const rows = getRowsFromPayload(payload);
+
+  if (!rows.length) return fallback;
+
+  const submitTimes = rows
+    .map((row) => {
+      const rawSubmitTime = readField(row, [
+          "submitTime",
+          "submit_time",
+          "submittedAt",
+          "submitted_at",
+          "createdAt",
+          "created_at",
+          "updatedAt",
+          "updated_at",
+        ]);
+
+      return getTimestampValue(rawSubmitTime === undefined || rawSubmitTime === null ? null : String(rawSubmitTime));
+    })
+    .filter((time) => time > 0)
+    .sort((first, second) => first - second);
+  const firstSubmitTime = submitTimes[0] || 0;
+  const lastSubmitTime = submitTimes[submitTimes.length - 1] || 0;
+  const calculatedTimeSeconds = firstSubmitTime && lastSubmitTime
+    ? Math.max(0, Math.round((lastSubmitTime - firstSubmitTime) / 1000))
+    : 0;
+  const responseTotalTime = Math.max(
+    0,
+    ...rows.map((row) =>
+      readFiniteNumberField(row, [
+        "totalTimeTaken",
+        "TotalTimeTaken",
+        "total_time_taken",
+        "theoryTimeSeconds",
+        "theory_time_seconds",
+        "totalTime",
+        "total_time",
+        "timeTaken",
+        "time_taken",
+        "elapsedTime",
+        "elapsed_time",
+      ]) || 0
+    )
+  );
+  const tabSwitchCount = Math.max(
+    0,
+    ...rows.map((row) =>
+      readFiniteNumberField(row, ["tabSwitchCount", "tab_switch_count", "tabSwitch", "tab_switch"]) || 0
+    )
+  );
+  const locationRow = rows.find((row) =>
+    readField(row, locationNameAliases) ||
+    readFiniteNumberField(row, latitudeAliases) !== undefined ||
+    readFiniteNumberField(row, longitudeAliases) !== undefined
+  );
+  const latitude = locationRow
+    ? readFiniteNumberField(locationRow, latitudeAliases) ?? fallback.latitude
+    : fallback.latitude;
+  const longitude = locationRow
+    ? readFiniteNumberField(locationRow, longitudeAliases) ?? fallback.longitude
+    : fallback.longitude;
+  const locationNameFromRow = locationRow ? String(readField(locationRow, locationNameAliases) || "").trim() : "";
+  const coordinateLocationName =
+    typeof latitude === "number" && typeof longitude === "number"
+      ? `Lat: ${latitude}, Long: ${longitude}`
+      : "";
+  const locationName = locationNameFromRow || coordinateLocationName || fallback.locationName;
+
+  return {
+    ...fallback,
+    startedAt: firstSubmitTime ? new Date(firstSubmitTime).toISOString() : fallback.startedAt,
+    submittedAt: lastSubmitTime ? new Date(lastSubmitTime).toISOString() : fallback.submittedAt,
+    theoryTimeSeconds: responseTotalTime || fallback.theoryTimeSeconds || calculatedTimeSeconds,
+    tabSwitchCount: Math.max(fallback.tabSwitchCount || 0, tabSwitchCount),
+    status: fallback.status === "not_started" && lastSubmitTime ? "submitted" : fallback.status,
+    locationName: locationName || fallback.locationName,
+    latitude,
+    longitude,
+  };
+};
+
+const candidateResponsePayloadHasLocation = (payload: unknown) =>
+  getRowsFromPayload(payload).some((row) =>
+    readField(row, locationNameAliases) ||
+    readFiniteNumberField(row, latitudeAliases) !== undefined ||
+    readFiniteNumberField(row, longitudeAliases) !== undefined
+  );
+
+const candidateResponsePayloadRowCount = (payload: unknown) => getRowsFromPayload(payload).length;
+
+const fetchCandidateResponsesPayload = async (candidateIds: number[]) => {
+  let firstNonEmptyPayload: unknown = null;
+  let lastError: unknown = null;
+  const uniqueCandidateIds = Array.from(new Set(candidateIds.filter(Boolean)));
+
+  for (const candidateId of uniqueCandidateIds) {
+    const urls = [
+      `${BASE_URL1}/responses/${candidateId}`,
+      `${BASE_URL1}/responses/candidate/${candidateId}`,
+    ];
+
+    for (const url of urls) {
+      try {
+        const payload = await fetchJson(url);
+        if (candidateResponsePayloadHasLocation(payload)) return payload;
+        if (!firstNonEmptyPayload && candidateResponsePayloadRowCount(payload) > 0) {
+          firstNonEmptyPayload = payload;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+  }
+
+  if (firstNonEmptyPayload) return firstNonEmptyPayload;
+  if (lastError) throw lastError;
+  return null;
+};
+
+const normalizeFileUrl = (value: unknown) => {
+  return buildBackendFilePreviewUrl(value);
 };
 
 const normalizeBatch = (value: Record<string, unknown>): BatchOption => ({
@@ -758,7 +917,7 @@ const normalizeBatch = (value: Record<string, unknown>): BatchOption => ({
 });
 
 const normalizeCandidate = (value: Record<string, unknown>): CandidateListRow => {
-  const nestedSourceEntries = ["user", "organization", "registration", "teamMember"]
+  const nestedSourceEntries = ["user", "organization", "registration", "teamMember", "examResult", "exam_result", "result", "exam"]
     .map((key) =>
       value[key] && typeof value[key] === "object"
         ? [key, value[key] as Record<string, unknown>] as const
@@ -772,10 +931,17 @@ const normalizeCandidate = (value: Record<string, unknown>): CandidateListRow =>
       .filter(([key]) => key === "organization" || key === "registration")
       .map(([, source]) => source),
   ];
-  const readTextFromSources = (sources: Record<string, unknown>[], aliases: string[]) => {
+  const readTextFromSources = (sources: Record<string, unknown>[], aliases: string[], options?: { skipNumericOnly?: boolean }) => {
     for (const source of sources) {
       const field = readField(source, aliases);
-      if (field !== null && field !== undefined && String(field).trim()) return String(field).trim();
+      if (
+        field !== null &&
+        field !== undefined &&
+        String(field).trim() &&
+        (!options?.skipNumericOnly || isMeaningfulDisplayText(field))
+      ) {
+        return String(field).trim();
+      }
     }
 
     return "";
@@ -796,6 +962,8 @@ const normalizeCandidate = (value: Record<string, unknown>): CandidateListRow =>
       .find(Boolean);
   const organizationName =
     readTextFromSources(organizationSources, [
+      "hospitalName",
+      "hospital_name",
       "organizationName",
       "organization_name",
       "orgName",
@@ -803,16 +971,16 @@ const normalizeCandidate = (value: Record<string, unknown>): CandidateListRow =>
       "institutionName",
       "instituteName",
       "collegeName",
-      "hospitalName",
       "companyName",
-    ]) ||
+    ], { skipNumericOnly: true }) ||
     readTextFromSources(
       nestedSourceEntries
         .filter(([key]) => key === "organization")
         .map(([, source]) => source),
-      ["name", "fullName"]
+      ["name", "fullName"],
+      { skipNumericOnly: true }
     );
-  const name = readTextFromSources([value, ...nestedSources], ["name", "fullName", "candidateName"]) || organizationName || "Candidate";
+  const name = readTextFromSources([value, ...nestedSources], ["name", "fullName", "candidateName"], { skipNumericOnly: true }) || organizationName || "Candidate";
 
   return {
     candidate_id: Number(value.candidate_id || value.candidateId || value.candidateID || value.id) || undefined,
@@ -828,7 +996,10 @@ const normalizeCandidate = (value: Record<string, unknown>): CandidateListRow =>
     batchId: Number(value.batchId || value.batch_id) || undefined,
     batch_id: Number(value.batch_id || value.batchId) || undefined,
     batchCode: value.batchCode ? String(value.batchCode) : undefined,
-    status: value.status ? String(value.status) : undefined,
+    status: readTextFromSources([value, ...nestedSources], ["status"]),
+    examStatus: readTextFromSources([value, ...nestedSources], ["examStatus", "exam_status"]),
+    quizStatus: readTextFromSources([value, ...nestedSources], ["quizStatus", "quiz_status"]),
+    resultStatus: readTextFromSources([value, ...nestedSources], ["resultStatus", "result_status"]),
     score: value.score === null || value.score === undefined ? null : Number(value.score),
   };
 };
@@ -1229,6 +1400,120 @@ const getTimestampValue = (value: string | null) => {
   return Number.isNaN(parsed) ? 0 : parsed;
 };
 
+const isCoordinateLocationText = (value: string) =>
+  /^\s*lat(?:itude)?\s*:/i.test(value) || /^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*$/.test(value);
+
+const formatCoordinateLocation = (latitude: number, longitude: number) =>
+  `Lat: ${latitude.toFixed(6)}, Long: ${longitude.toFixed(6)}`;
+
+const getOverviewLocationParts = (overview?: EvidenceViewData["overview"] | null) => {
+  if (!overview) {
+    return {
+      locationName: "",
+      latitude: null,
+      longitude: null,
+    };
+  }
+
+  return {
+    locationName: String(overview.locationName || "").trim(),
+    latitude: typeof overview.latitude === "number" && Number.isFinite(overview.latitude) ? overview.latitude : null,
+    longitude: typeof overview.longitude === "number" && Number.isFinite(overview.longitude) ? overview.longitude : null,
+  };
+};
+
+const LocationAddress = ({ overview }: { overview?: EvidenceViewData["overview"] | null }) => {
+  const { locationName, latitude, longitude } = getOverviewLocationParts(overview);
+  const hasCoordinates = latitude !== null && longitude !== null;
+  const hasReadableLocation =
+    locationName &&
+    locationName !== "Location not available" &&
+    !isCoordinateLocationText(locationName);
+  const coordinateText = hasCoordinates ? formatCoordinateLocation(latitude, longitude) : "";
+  const [resolvedAddress, setResolvedAddress] = useState("");
+  const [lookupComplete, setLookupComplete] = useState(false);
+
+  useEffect(() => {
+    let isActive = true;
+    setResolvedAddress("");
+    setLookupComplete(false);
+
+    if (!hasCoordinates || hasReadableLocation) {
+      setLookupComplete(true);
+      return;
+    }
+
+    const reverseGeocode = async () => {
+      try {
+        const urls = [
+          `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`,
+          `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}`,
+        ];
+
+        for (const url of urls) {
+          const response = await fetch(url);
+          const payload = await response.json().catch(() => null);
+          const address =
+            typeof payload?.display_name === "string"
+              ? payload.display_name.trim()
+              : [
+                  payload?.locality,
+                  payload?.city,
+                  payload?.principalSubdivision,
+                  payload?.postcode,
+                  payload?.countryName,
+                ]
+                  .filter(Boolean)
+                  .join(", ");
+
+          if (address) {
+            if (isActive) setResolvedAddress(address);
+            return;
+          }
+        }
+      } catch {
+        // Keep the map fallback if address lookup is unavailable.
+      } finally {
+        if (isActive) setLookupComplete(true);
+      }
+    };
+
+    void reverseGeocode();
+
+    return () => {
+      isActive = false;
+    };
+  }, [hasCoordinates, hasReadableLocation, latitude, longitude]);
+
+  const displayLocation = hasReadableLocation
+    ? locationName
+    : resolvedAddress || (hasCoordinates && !lookupComplete ? "Resolving address..." : coordinateText || "Location not available");
+
+  return (
+    <span className="block min-w-0 space-y-2">
+      <span className="block whitespace-normal break-words">{displayLocation}</span>
+      {hasCoordinates && (
+        <iframe
+          title="Candidate exam location"
+          src={`https://maps.google.com/maps?q=${latitude},${longitude}&z=15&output=embed`}
+          loading="lazy"
+          className="h-32 w-full rounded-lg border border-sky-100 bg-sky-50"
+        />
+      )}
+      {hasCoordinates && (
+        <a
+          href={`https://www.google.com/maps?q=${latitude},${longitude}`}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-1 inline-flex text-xs font-medium text-sky-700 hover:text-sky-900 hover:underline"
+        >
+          Open full map
+        </a>
+      )}
+    </span>
+  );
+};
+
 const SectionHeader = ({
   icon: Icon,
   title,
@@ -1260,24 +1545,32 @@ const CompactInfoCard = ({
 }: {
   icon: IconComponent;
   label: string;
-  value: string | number | null;
+  value: ReactNode;
   detail?: string;
   tone?: Tone;
 }) => {
   const displayValue = value === 0 ? "0" : value || "--";
+  const title = typeof displayValue === "string" || typeof displayValue === "number" ? String(displayValue) : undefined;
 
   return (
-    <div className="rounded-xl border border-sky-100 bg-white px-3 py-3 shadow-sm">
+    <div className="min-h-[6.25rem] rounded-xl border border-sky-100 bg-white px-3 py-3 shadow-sm">
       <div className="flex min-w-0 items-start gap-2.5">
         <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${toneIconClass[tone]}`}>
           <Icon className="h-4 w-4" />
         </span>
-        <div className="min-w-0">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">{label}</p>
-          <p className="mt-0.5 truncate text-sm font-semibold text-slate-950" title={String(displayValue)}>
+        <div className="min-w-0 flex-1">
+          <p className="break-words text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">{label}</p>
+          <p
+            className="mt-0.5 line-clamp-3 overflow-hidden break-all text-sm font-semibold leading-5 text-slate-950"
+            title={title}
+          >
             {displayValue}
           </p>
-          {detail && <p className="mt-0.5 truncate text-xs text-slate-500" title={detail}>{detail}</p>}
+          {detail && (
+            <p className="mt-0.5 line-clamp-2 overflow-hidden break-words text-xs leading-4 text-slate-500" title={detail}>
+              {detail}
+            </p>
+          )}
         </div>
       </div>
     </div>
@@ -1370,7 +1663,9 @@ export {
   buildCandidateEvidenceBase,
   CompactInfoCard,
   demoVideoPoster,
+  deriveCandidateResponseOverview,
   EmptyState,
+  fetchCandidateResponsesPayload,
   fetchCandidateEvidence,
   fetchJson,
   fetchRandomEvidenceMedia,
@@ -1386,6 +1681,7 @@ export {
   getCandidateUserId,
   getTimestampValue,
   isRenderableImage,
+  LocationAddress,
   MetricCard,
   normalizeBatch,
   normalizeCandidate,

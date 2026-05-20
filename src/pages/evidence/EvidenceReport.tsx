@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {AlertCircle, ArrowLeft, BarChart3, CheckCircle2, Clock, ClipboardList, FileQuestion, Hash,
-  Layers, Loader2, RefreshCw, Trophy, User, XCircle} from "lucide-react";
+  Layers, Loader2, MapPin, RefreshCw, Trophy, User, XCircle} from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BASE_URL1 } from "@/Service/api";
 import {
   Table,
   TableBody,
@@ -11,18 +12,22 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { BASE_URL1 } from "@/Service/api";
 import {
   CompactInfoCard,
+  deriveCandidateResponseOverview,
   EmptyState,
   SectionHeader,
+  fetchCandidateEvidence,
   fetchJson,
   formatDateTime,
   formatDuration,
   getBatchCode,
   getCandidateId,
+  getCandidateUserId,
+  LocationAddress,
   unwrapApiData,
   type EvidenceRouteState,
+  type EvidenceViewData,
 } from "./EvidenceShared";
 
 interface ReportResponseRow {
@@ -40,6 +45,7 @@ interface ReportResponseRow {
   candidateId: number | null;
   submitTime: string | null;
   tabSwitchCount: number;
+  isCorrect: boolean | null;
 }
 
 type ScoreState = "correct" | "partial" | "incorrect" | "reviewed";
@@ -54,25 +60,294 @@ const toNullableNumber = (value: unknown) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
-const normalizeText = (value: unknown) =>
-  typeof value === "string" && value.trim() ? value.trim() : null;
+const repairDisplayText = (value: string) =>
+  value
+    .replace(/Â°/g, "°")
+    .replace(/�\s*([CF])/gi, "°$1")
+    .replace(/&deg;/gi, "°")
+    .replace(/&#176;/g, "°")
+    .replace(/&#xB0;/gi, "°");
 
-const normalizeReportRow = (value: Record<string, unknown>, index: number): ReportResponseRow => ({
-  obtMarks: toNumber(value.obtMarks || value.obtainedMarks || value.score),
-  questionId: toNumber(value.questionId || value.question_id || index + 1, index + 1),
-  question: String(value.question || value.questionText || `Question ${index + 1}`),
-  optiona: normalizeText(value.optiona || value.optionA),
-  optionb: normalizeText(value.optionb || value.optionB),
-  optionc: normalizeText(value.optionc || value.optionC),
-  optiond: normalizeText(value.optiond || value.optionD),
-  ansId: String(value.ansId || value.answerId || value.selectedOption || ""),
-  qbId: toNullableNumber(value.qbId || value.qb_id),
-  correctOption: String(value.correctOption ?? value.correct_option ?? ""),
-  marks: toNumber(value.marks || value.totalMarks),
-  candidateId: toNullableNumber(value.candidateId || value.candidate_id),
-  submitTime: normalizeText(value.submitTime || value.submit_time || value.submittedAt || value.submitted_at),
-  tabSwitchCount: toNumber(value.tabSwitchCount || value.tab_switch_count),
-});
+const normalizeText = (value: unknown) =>
+  typeof value === "string" && value.trim() ? repairDisplayText(value.trim()) : null;
+
+const normalizeAlias = (value: string) => value.replace(/[_\-\s]/g, "").toLowerCase();
+
+const readField = (value: Record<string, unknown>, aliases: string[]) => {
+  const normalizedAliases = aliases.map(normalizeAlias);
+  const matchedEntry = Object.entries(value).find(([key]) => normalizedAliases.includes(normalizeAlias(key)));
+  return matchedEntry?.[1];
+};
+
+const readText = (value: Record<string, unknown>, aliases: string[]) => normalizeText(readField(value, aliases));
+const readNumber = (value: Record<string, unknown>, aliases: string[], fallback = 0) =>
+  toNumber(readField(value, aliases), fallback);
+
+const collectNestedRecords = (value: Record<string, unknown>) =>
+  ["question", "questionData", "question_data", "questionBank", "question_bank", "qb", "response", "answer"]
+    .map((key) => value[key])
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)));
+
+const readFieldFromRecords = (records: Record<string, unknown>[], aliases: string[]) => {
+  for (const record of records) {
+    const value = readField(record, aliases);
+    if (value !== null && value !== undefined && value !== "") return value;
+  }
+
+  return undefined;
+};
+
+const readTextFromRecords = (records: Record<string, unknown>[], aliases: string[]) =>
+  normalizeText(readFieldFromRecords(records, aliases));
+
+const readNumberFromRecords = (records: Record<string, unknown>[], aliases: string[], fallback = 0) =>
+  toNumber(readFieldFromRecords(records, aliases), fallback);
+
+const readPositiveNumberFromRecords = (records: Record<string, unknown>[], aliases: string[]) => {
+  const parsed = Number(readFieldFromRecords(records, aliases));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const normalizeOptionText = (value: unknown) => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return normalizeText(record.text || record.option || record.value || record.label || record.name);
+  }
+
+  return normalizeText(value);
+};
+
+const parseOptions = (value: unknown) => {
+  if (Array.isArray(value)) return value.map(normalizeOptionText).filter(Boolean) as string[];
+  if (typeof value !== "string") return [];
+
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return parsed.map(normalizeOptionText).filter(Boolean) as string[];
+  } catch {
+    // Use delimiter parsing below.
+  }
+
+  return trimmed
+    .split(/\r?\n|\s*\|\s*|\s*;\s*/)
+    .map(normalizeOptionText)
+    .filter(Boolean) as string[];
+};
+
+const readOptionsFromRecords = (records: Record<string, unknown>[]) => {
+  const directOptions = parseOptions(readFieldFromRecords(records, ["options", "optionList", "option_list", "choices", "answers"]));
+  if (directOptions.length) return directOptions.slice(0, 4);
+
+  return [
+    readTextFromRecords(records, ["optiona", "optionA", "option1", "option_1", "a"]),
+    readTextFromRecords(records, ["optionb", "optionB", "option2", "option_2", "b"]),
+    readTextFromRecords(records, ["optionc", "optionC", "option3", "option_3", "c"]),
+    readTextFromRecords(records, ["optiond", "optionD", "option4", "option_4", "d"]),
+  ];
+};
+
+const getQuestionRowId = (row: Record<string, unknown>) =>
+  readPositiveNumberFromRecords([row], ["questionId", "question_id", "qbId", "qb_id", "id"]);
+
+const getResponseQuestionId = (row: Record<string, unknown>) =>
+  readPositiveNumberFromRecords([row], ["questionId", "question_id", "qbId", "qb_id"]);
+
+const getRowTimestamp = (row: Record<string, unknown>) => {
+  const value = readText(row, ["submitTime", "submit_time", "submittedAt", "submitted_at", "createdOn", "created_on", "createdAt", "created_at"]);
+  const parsed = value ? new Date(value.replace(/(\.\d{3})\d+/, "$1")).getTime() : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const sortResponseRows = (rows: Record<string, unknown>[]) =>
+  [...rows].sort((first, second) => {
+    const timeDiff = getRowTimestamp(first) - getRowTimestamp(second);
+    if (timeDiff !== 0) return timeDiff;
+    return (
+      readNumber(first, ["recordId", "record_id", "id"], 0) -
+      readNumber(second, ["recordId", "record_id", "id"], 0)
+    );
+  });
+
+const getRowsFromQuestionPayload = (payload: unknown) => {
+  const data = unwrapApiData(payload);
+  if (Array.isArray(data)) return data.filter((item) => item && typeof item === "object") as Record<string, unknown>[];
+  if (!data || typeof data !== "object") return [];
+
+  const record = data as Record<string, unknown>;
+  const nestedRows = [record.questions, record.data, record.items, record.rows, record.content].find(Array.isArray);
+  return Array.isArray(nestedRows)
+    ? (nestedRows.filter((item) => item && typeof item === "object") as Record<string, unknown>[])
+    : [];
+};
+
+const fetchReportQuestionRows = async (batchId: number | string | null | undefined, questionBankId: number | string | null | undefined) => {
+  const urls = [
+    questionBankId && batchId ? `/questions/bank/${questionBankId}/batch/${batchId}` : "",
+    questionBankId ? `/questions/bank/${questionBankId}` : "",
+    batchId ? `/questions/batch/${batchId}` : "",
+  ].filter(Boolean) as string[];
+
+  for (const path of urls) {
+    try {
+      const rows = getRowsFromQuestionPayload(await fetchJson(path.startsWith("http") ? path : `${BASE_URL1}${path}`));
+      if (rows.length) return rows;
+    } catch (error) {
+      console.warn(`Unable to load report questions from ${path}`, error);
+    }
+  }
+
+  return [];
+};
+
+const mergeResponsesWithQuestions = (responses: Record<string, unknown>[], questions: Record<string, unknown>[]) => {
+  if (!questions.length) return responses;
+
+  const questionById = new Map<number, Record<string, unknown>>();
+  questions.forEach((question) => {
+    const questionId = getQuestionRowId(question);
+    if (questionId) questionById.set(questionId, question);
+  });
+
+  return responses.map((response, index) => {
+    const responseQuestionId = getResponseQuestionId(response);
+    const question = (responseQuestionId && questionById.get(responseQuestionId)) || questions[index];
+    return question ? { ...response, question } : response;
+  });
+};
+
+const normalizeAnswer = (value: string) =>
+  value
+    .split(/[,\-\s]+/)
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join(",");
+
+const extractPackedAnswer = (value: unknown, questionId: number) => {
+  const rawValue = typeof value === "string" ? value.trim() : "";
+  if (!rawValue || !questionId) return "";
+
+  const parts = rawValue.split(",").map((item) => item.trim()).filter(Boolean);
+  const matchedPart = parts.find((part) => part.startsWith(`${questionId}_`));
+  return matchedPart ? matchedPart.slice(String(questionId).length + 1) : "";
+};
+
+const readBoolean = (value: Record<string, unknown>, aliases: string[]) => {
+  const rawValue = readField(value, aliases);
+  if (typeof rawValue === "boolean") return rawValue;
+  if (typeof rawValue === "number") return rawValue === 1;
+  if (typeof rawValue === "string" && rawValue.trim()) {
+    const normalized = rawValue.trim().toLowerCase();
+    if (["true", "1", "yes", "correct"].includes(normalized)) return true;
+    if (["false", "0", "no", "incorrect"].includes(normalized)) return false;
+  }
+  return null;
+};
+
+const inferMarks = (value: Record<string, unknown>, answer: string, correctAnswer: string) => {
+  const directMarks = readNumber(value, ["marks", "totalMarks", "questionMarks", "maxMarks"], 0);
+  if (directMarks > 0) return directMarks;
+  return correctAnswer ? 1 : 0;
+};
+
+const inferObtainedMarks = (
+  value: Record<string, unknown>,
+  answer: string,
+  correctAnswer: string,
+  marks: number,
+  isCorrect: boolean | null
+) => {
+  const directScore = readField(value, [
+    "obtMarks",
+    "obtainedMarks",
+    "marksObtained",
+    "score",
+    "obt_marks",
+    "obtained_marks",
+    "marks_obtained",
+  ]);
+  if (directScore !== undefined && directScore !== null && directScore !== "") return toNumber(directScore);
+
+  if (isCorrect !== null) return isCorrect ? marks : 0;
+
+  if (answer && correctAnswer && normalizeAnswer(answer) === normalizeAnswer(correctAnswer)) return marks;
+  return 0;
+};
+
+const normalizeReportRow = (value: Record<string, unknown>, index: number): ReportResponseRow => {
+  const records = [value, ...collectNestedRecords(value)];
+  const questionId = readNumberFromRecords(records, ["questionId", "question_id", "qbId", "qb_id", "id"], index + 1);
+  const rawAnswer = readFieldFromRecords(records, [
+    "ansId",
+    "ans_id",
+    "answerId",
+    "answer_id",
+    "selectedOption",
+    "selected_option",
+    "selectedAnswer",
+    "selected_answer",
+    "selectedOptionId",
+    "selected_option_id",
+    "responseId",
+    "response_id",
+    "responseText",
+    "response_text",
+    "answerText",
+    "answer_text",
+    "answer",
+  ]);
+  const ansId = String(rawAnswer || extractPackedAnswer(readField(value, ["Option", "option"]), questionId) || "");
+  const correctOption = String(readFieldFromRecords(records, [
+    "correctOption",
+    "correct_option",
+    "correctOptionId",
+    "correct_option_id",
+    "correctAnswer",
+    "correct_answer",
+    "correctAnswerId",
+    "correct_answer_id",
+    "correctAnswerText",
+    "correct_answer_text",
+    "correctAns",
+    "correct_ans",
+    "rightAnswer",
+    "right_answer",
+    "rightOption",
+    "right_option",
+    "answerKey",
+    "answer_key",
+  ]) || "");
+  const directCorrect = readBoolean(value, ["isCorrect", "is_correct", "correct", "answerCorrect", "answer_correct"]);
+  const derivedCorrect = ansId && correctOption ? normalizeAnswer(ansId) === normalizeAnswer(correctOption) : null;
+  const isCorrect = directCorrect ?? derivedCorrect;
+  const marks = inferMarks(value, ansId, correctOption);
+  const options = readOptionsFromRecords(records);
+
+  return {
+    obtMarks: inferObtainedMarks(value, ansId, correctOption, marks, isCorrect),
+    questionId,
+    question: String(
+      readTextFromRecords(records, ["question", "questionText", "question_text", "title", "text", "questionName", "question_name"]) ||
+        `Question ${index + 1}`
+    ),
+    optiona: options[0] || null,
+    optionb: options[1] || null,
+    optionc: options[2] || null,
+    optiond: options[3] || null,
+    ansId,
+    qbId: toNullableNumber(readFieldFromRecords(records, ["qbId", "qb_id", "questionBankId", "question_bank_id"])),
+    correctOption,
+    marks,
+    candidateId: toNullableNumber(readFieldFromRecords(records, ["candidateId", "candidate_id"])),
+    submitTime: readTextFromRecords(records, ["submitTime", "submit_time", "submittedAt", "submitted_at", "createdOn", "created_on", "createdAt", "created_at"]) || null,
+    tabSwitchCount: readNumberFromRecords(records, ["tabSwitchCount", "tab_switch_count"]),
+    isCorrect,
+  };
+};
 
 const normalizeDateTimeValue = (value: string | null) => {
   if (!value) return null;
@@ -92,6 +367,53 @@ const formatSubmitTime = (value: string | null) => {
   return normalizedValue ? formatDateTime(normalizedValue) : "--";
 };
 
+const getReportRowsFromPayload = (payload: unknown) => {
+  const data = unwrapApiData(payload);
+  if (Array.isArray(data)) return data.filter((item) => item && typeof item === "object") as Record<string, unknown>[];
+
+  if (!data || typeof data !== "object") return [];
+
+  const record = data as Record<string, unknown>;
+  const nestedRows = [
+    record.responses,
+    record.answers,
+    record.responseDetails,
+    record.candidateResponses,
+    record.candidate_responses,
+    record.rows,
+    record.items,
+    record.data,
+  ].find(Array.isArray);
+
+  return Array.isArray(nestedRows)
+    ? (nestedRows.filter((item) => item && typeof item === "object") as Record<string, unknown>[])
+    : [];
+};
+
+const fetchCandidateReportPayload = async (candidateId: number, fallbackUserId: number) => {
+  const ids = Array.from(new Set([candidateId, fallbackUserId].filter(Boolean)));
+  let lastError: unknown = null;
+
+  for (const id of ids) {
+    try {
+      const payload = await fetchJson(`${BASE_URL1}/responses/${id}`);
+      const rows = getReportRowsFromPayload(payload);
+      const hasJoinedQuestionData = rows.some((row) =>
+        readText(row, ["question", "questionText", "question_text"]) ||
+        readText(row, ["correctOption", "correct_option", "correctAnswer", "correct_answer"]) ||
+        readNumber(row, ["marks"], 0) > 0
+      );
+
+      if (hasJoinedQuestionData || rows.length > 0) return payload;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
+};
+
 const getOptionEntries = (row: ReportResponseRow) => [
   { id: "1", label: "A", value: row.optiona },
   { id: "2", label: "B", value: row.optionb },
@@ -108,13 +430,17 @@ const splitAnswerIds = (value: string) =>
 const formatOptionValue = (row: ReportResponseRow, value: string) => {
   if (!value || value === "0") return "--";
 
-  const ids = splitAnswerIds(value);
-  const values = (ids.length > 0 ? ids : [value]).map((id) => {
+  const trimmedValue = repairDisplayText(value.trim());
+  const looksLikeChoiceIds = /^[A-Da-d1-4](?:[,\-\s]+[A-Da-d1-4])*$/.test(trimmedValue);
+  if (!looksLikeChoiceIds) return trimmedValue;
+
+  const ids = splitAnswerIds(trimmedValue);
+  const values = (ids.length > 0 ? ids : [trimmedValue]).map((id) => {
     const option = getOptionEntries(row).find(
       (entry) => entry.id === id || entry.label.toLowerCase() === id.toLowerCase()
     );
 
-    if (!option) return `Option ${id}`;
+    if (!option) return value;
     return option.value ? `${option.label}. ${option.value}` : `Option ${id}`;
   });
 
@@ -122,6 +448,8 @@ const formatOptionValue = (row: ReportResponseRow, value: string) => {
 };
 
 const getScoreState = (row: ReportResponseRow): ScoreState => {
+  if (row.isCorrect === true) return "correct";
+  if (row.isCorrect === false) return "incorrect";
   if (row.marks > 0 && row.obtMarks >= row.marks) return "correct";
   if (row.obtMarks > 0) return "partial";
   if (row.marks > 0) return "incorrect";
@@ -170,10 +498,12 @@ const EvidenceReportPage = ({ candidateId }: { candidateId: number }) => {
   const routeState = (location.state || {}) as EvidenceRouteState;
   const [responses, setResponses] = useState<ReportResponseRow[]>([]);
   const [serverCount, setServerCount] = useState<number | null>(null);
+  const [evidenceOverview, setEvidenceOverview] = useState<EvidenceViewData["overview"] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   const displayCandidateId = getCandidateId(routeState.candidate) || responses[0]?.candidateId || candidateId;
+  const reportUserId = getCandidateUserId(routeState.candidate) || candidateId;
   const candidateName = routeState.candidate?.name || `Candidate #${displayCandidateId}`;
   const batchCode = getBatchCode(routeState.batch) || routeState.candidate?.batchCode || "--";
 
@@ -182,16 +512,18 @@ const EvidenceReportPage = ({ candidateId }: { candidateId: number }) => {
     const obtainedMarks = responses.reduce((sum, row) => sum + row.obtMarks, 0);
     const correctCount = responses.filter((row) => getScoreState(row) === "correct").length;
     const percentage = totalMarks > 0 ? (obtainedMarks / totalMarks) * 100 : 0;
-    const maxTabSwitchCount = responses.reduce((maxCount, row) => Math.max(maxCount, row.tabSwitchCount), 0);
+    const responseTabSwitchCount = responses.reduce((maxCount, row) => Math.max(maxCount, row.tabSwitchCount), 0);
+    const maxTabSwitchCount = Math.max(responseTabSwitchCount, Number(evidenceOverview?.tabSwitchCount) || 0);
     const sortedSubmitTimes = responses
       .map((row) => getSubmitTimestamp(row.submitTime))
       .filter(Boolean)
       .sort((first, second) => first - second);
     const firstSubmitTime = sortedSubmitTimes[0] || 0;
     const lastSubmitTime = sortedSubmitTimes[sortedSubmitTimes.length - 1] || 0;
-    const totalTimeSeconds = firstSubmitTime && lastSubmitTime
+    const calculatedTimeSeconds = firstSubmitTime && lastSubmitTime
       ? Math.max(0, Math.round((lastSubmitTime - firstSubmitTime) / 1000))
       : 0;
+    const totalTimeSeconds = Number(evidenceOverview?.theoryTimeSeconds) || calculatedTimeSeconds;
 
     return {
       totalMarks,
@@ -200,10 +532,11 @@ const EvidenceReportPage = ({ candidateId }: { candidateId: number }) => {
       percentage,
       maxTabSwitchCount,
       totalTimeSeconds,
+      calculatedTimeSeconds,
       firstSubmitTime,
       lastSubmitTime,
     };
-  }, [responses]);
+  }, [evidenceOverview, responses]);
 
   const timeSpentByRowKey = useMemo(() => {
     const sortedRows = responses
@@ -231,21 +564,55 @@ const EvidenceReportPage = ({ candidateId }: { candidateId: number }) => {
   const loadReport = async () => {
     setLoading(true);
     setError("");
+    setResponses([]);
+    setServerCount(null);
+    setEvidenceOverview(null);
 
     try {
-      const payload = await fetchJson(`${BASE_URL1}/responses/${candidateId}`);
-      const data = unwrapApiData(payload);
-      const rows = Array.isArray(data) ? data : [];
+      const [responsePayload, evidenceResult] = await Promise.allSettled([
+        fetchCandidateReportPayload(candidateId, reportUserId),
+        fetchCandidateEvidence(reportUserId, routeState.candidate, routeState.batch, location.state),
+      ]);
+
+      if (responsePayload.status === "rejected") {
+        throw responsePayload.reason;
+      }
+
+      const payload = responsePayload.value;
+      const fallbackOverview = evidenceResult.status === "fulfilled" ? evidenceResult.value.overview : null;
+      const rows = sortResponseRows(getReportRowsFromPayload(payload));
+      const questionRows = await fetchReportQuestionRows(
+        routeState.batch?.id || routeState.batch?.batch_id || routeState.candidate?.batchId || routeState.candidate?.batch_id,
+        routeState.batch?.questionBankId,
+      );
+      const reportRows = mergeResponsesWithQuestions(rows, questionRows);
       const count =
         payload && typeof payload === "object" && "count" in payload
-          ? toNumber((payload as Record<string, unknown>).count, rows.length)
-          : rows.length;
+          ? toNumber((payload as Record<string, unknown>).count, reportRows.length)
+          : reportRows.length;
 
-      setResponses(rows.map((row, index) => normalizeReportRow(row as Record<string, unknown>, index)));
+      if (fallbackOverview) {
+        setEvidenceOverview(deriveCandidateResponseOverview(payload, fallbackOverview));
+      } else {
+        const emptyOverview: EvidenceViewData["overview"] = {
+          startedAt: new Date().toISOString(),
+          submittedAt: null,
+          theoryTimeSeconds: 0,
+          tabSwitchCount: 0,
+          status: "not_started",
+          locationName: "Location not available",
+          latitude: null,
+          longitude: null,
+        };
+        setEvidenceOverview(deriveCandidateResponseOverview(payload, emptyOverview));
+      }
+
+      setResponses(reportRows.map((row, index) => normalizeReportRow(row as Record<string, unknown>, index)));
       setServerCount(count);
     } catch (fetchError) {
       setResponses([]);
       setServerCount(null);
+      setEvidenceOverview(null);
       setError(fetchError instanceof Error ? fetchError.message : "Failed to fetch report");
     } finally {
       setLoading(false);
@@ -253,8 +620,8 @@ const EvidenceReportPage = ({ candidateId }: { candidateId: number }) => {
   };
 
   useEffect(() => {
-    loadReport();
-  }, [candidateId]);
+    void loadReport();
+  }, [candidateId, location.key, reportUserId]);
 
   return (
     <div className="min-h-screen bg-[#f3fbff] text-slate-900">
@@ -267,15 +634,15 @@ const EvidenceReportPage = ({ candidateId }: { candidateId: number }) => {
                   <BarChart3 className="h-5 w-5" />
                 </span>
                 <div className="min-w-0">
-                  <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Candidate Report</h1>
+                  <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Log Report</h1>
                   <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
-                    {candidateName} - Candidate ID {displayCandidateId}
+                    {candidateName}
                   </p>
                 </div>
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => navigate("/Evidence")} className="border-sky-200 bg-white text-sky-700 hover:bg-sky-50">
+                <Button variant="outline" size="sm" onClick={() => navigate("/Evidence", { state: routeState.backState || routeState })} className="border-sky-200 bg-white text-sky-700 hover:bg-sky-50">
                   <ArrowLeft className="h-4 w-4" />
                   Back
                 </Button>
@@ -287,15 +654,6 @@ const EvidenceReportPage = ({ candidateId }: { candidateId: number }) => {
             </div>
           </div>
 
-          <div className="grid gap-3 bg-white px-4 py-4 sm:grid-cols-2 sm:px-6 lg:grid-cols-7">
-            <CompactInfoCard icon={User} label="Candidate" value={candidateName} tone="emerald" />
-            <CompactInfoCard icon={Hash} label="Candidate ID" value={displayCandidateId} tone="cyan" />
-            <CompactInfoCard icon={Layers} label="Batch" value={batchCode} tone="sky" />
-            <CompactInfoCard icon={ClipboardList} label="Responses" value={serverCount ?? responses.length} tone="cyan" />
-            <CompactInfoCard icon={Trophy} label="Score" value={`${reportSummary.obtainedMarks}/${reportSummary.totalMarks}`} detail={`${reportSummary.percentage.toFixed(1)}%`} tone="emerald" />
-            <CompactInfoCard icon={AlertCircle} label="Tab Switches" value={reportSummary.maxTabSwitchCount} tone={reportSummary.maxTabSwitchCount ? "rose" : "emerald"} />
-            <CompactInfoCard icon={Clock} label="Total Time" value={formatDuration(reportSummary.totalTimeSeconds)} detail="First to last submit" tone="amber" />
-          </div>
         </div>
 
         {error && (
@@ -310,26 +668,9 @@ const EvidenceReportPage = ({ candidateId }: { candidateId: number }) => {
             <SectionHeader
               icon={FileQuestion}
               title="Response Report"
-              description={`${reportSummary.correctCount} correct response${reportSummary.correctCount === 1 ? "" : "s"} out of ${responses.length}. Total tab switches: ${reportSummary.maxTabSwitchCount}.`}
+              description={`${reportSummary.correctCount} correct response${reportSummary.correctCount === 1 ? "" : "s"} out of ${responses.length}. Tab switch: ${reportSummary.maxTabSwitchCount}. Total time: ${formatDuration(reportSummary.totalTimeSeconds)}.`}
             />
           </div>
-
-          {!loading && responses.length > 0 && (
-            <div className="mb-4 grid gap-3 rounded-xl border border-sky-100 bg-sky-50/50 p-3 text-xs text-slate-600 sm:grid-cols-2 lg:grid-cols-3">
-              <div>
-                <p className="font-semibold uppercase tracking-[0.08em] text-slate-500">First Submit</p>
-                <p className="mt-1 font-medium text-slate-900">{reportSummary.firstSubmitTime ? formatDateTime(new Date(reportSummary.firstSubmitTime).toISOString()) : "--"}</p>
-              </div>
-              <div>
-                <p className="font-semibold uppercase tracking-[0.08em] text-slate-500">Last Submit</p>
-                <p className="mt-1 font-medium text-slate-900">{reportSummary.lastSubmitTime ? formatDateTime(new Date(reportSummary.lastSubmitTime).toISOString()) : "--"}</p>
-              </div>
-              <div>
-                <p className="font-semibold uppercase tracking-[0.08em] text-slate-500">Calculated Time</p>
-                <p className="mt-1 font-medium text-slate-900">{formatDuration(reportSummary.totalTimeSeconds)}</p>
-              </div>
-            </div>
-          )}
 
           {loading ? (
             <div className="flex min-h-[260px] items-center justify-center rounded-xl border border-dashed border-sky-200 bg-sky-50/60">

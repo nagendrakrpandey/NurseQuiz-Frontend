@@ -3,23 +3,24 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { Activity, AlertCircle, AlertTriangle, CheckCircle, ChevronRight,Clock, Flag, Languages, Menu, ShieldCheck, Video, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { RadioGroup } from "@/components/ui/radio-group";
 import {Select,SelectContent,SelectItem,SelectTrigger,SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { BASE_URL1 } from "@/Service/api";
+import { BASE_URL1, FACE_API_INACTIVE_MESSAGE, verifyFaceFrame, saveFaceWarning, type FaceVerifyResponse, type FaceWarningRequest } from "@/Service/api";
 import { clearAuthSession, EXAM_INSTRUCTION_DONE_KEY, EXAM_PRECHECK_DONE_KEY } from "@/lib/session";
 import {
+  JPEG_MIME_TYPE,
   PNG_MIME_TYPE,
+  blobToDataUrl,
   canvasToBlob,
   getFileExtensionFromMimeType,
   getPreferredVideoMimeType,
 } from "@/lib/evidenceMedia";
+import { normalizeTemperatureText } from "@/lib/formValidation";
 import {
   applyDashboardExamCompletionOverride,
   fetchDashboardData,
@@ -31,6 +32,7 @@ import {
   mergeDashboardExamResult,
   normalizeExamStage,
   saveDashboardExamCompletionOverride,
+  startDashboardExam,
 } from "@/lib/userDashboard";
 
 interface Question {
@@ -125,6 +127,21 @@ interface Candidate {
   qbankId?: number;
   qbank_id?: number;
   status?: string;
+}
+
+interface ExamTeamMember {
+  id: string;
+  name: string;
+  email?: string;
+}
+
+interface MemberFaceStatus {
+  teamMemberId: string;
+  name: string;
+  status: string;
+  alert: boolean;
+  message: string;
+  score?: number;
 }
 
 interface UIQuestion {
@@ -437,26 +454,311 @@ const getQuestionBankQuestionCountFromRecord = (bank: Record<string, unknown>) =
 
 const getQuestionBankLevelFromRecord = (bank: Record<string, unknown>) =>
   normalizeLevelValue(
-    String(
-      bank.level ||
-        bank.qbLevel ||
-        bank.qb_level ||
-        bank.qbankLevel ||
-        bank.qbank_level ||
-        bank.questionBankLevel ||
-        bank.question_bank_level ||
-        bank.levelName ||
-        bank.level_name ||
-        bank.examLevel ||
-        bank.exam_level ||
-        getQuestionBankNameFromRecord(bank) ||
-        "",
-    ),
-  );
+    String( bank.level ||  bank.qbLevel ||  bank.qb_level ||  bank.qbankLevel ||  bank.qbank_level ||
+        bank.questionBankLevel || bank.question_bank_level || bank.levelName || bank.level_name ||
+        bank.examLevel || bank.exam_level || getQuestionBankNameFromRecord(bank) || "",  ), );
 
 const getQuestionRowsFromPayload = (payload: unknown) => {
   const data = unwrapApiData(payload);
   return Array.isArray(data) ? data : [];
+};
+
+const readStringByAliases = (value: Record<string, unknown> | null | undefined, aliases: string[]) => {
+  if (!value) return "";
+
+  const normalizedAliases = aliases.map(normalizeAlias);
+  const matchedEntry = Object.entries(value).find(([key]) =>
+    normalizedAliases.includes(normalizeAlias(key)),
+  );
+
+  const rawValue = matchedEntry?.[1];
+  if (rawValue === null || rawValue === undefined) return "";
+
+  return String(rawValue).trim();
+};
+
+const getResponseRowsFromPayload = (payload: unknown) => {
+  const data = unwrapApiData(payload);
+  return (Array.isArray(data) ? data : Array.isArray(payload) ? payload : [])
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object");
+};
+
+const getResponseTimestamp = (row: Record<string, unknown>) => {
+  const rawValue = readStringByAliases(row, ["submitTime", "submit_time", "submittedAt", "submitted_at", "updatedAt", "updated_at", "createdAt", "created_at"]);
+  if (!rawValue) return 0;
+  const parsed = new Date(rawValue.replace(/(\.\d{3})\d+/, "$1")).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const fetchSavedCandidateResponses = async (candidateId: number) => {
+  const urls = [
+    `${BASE_URL1}/responses/${candidateId}`,
+    `${BASE_URL1}/responses/candidate/${candidateId}`,
+  ];
+
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, getAuthFetchOptions());
+      const payload = await parseJsonResponse(response);
+      if (!response.ok) continue;
+
+      const rows = getResponseRowsFromPayload(payload);
+      if (rows.length > 0) return rows;
+    } catch {
+      // Try the next compatible response endpoint.
+    }
+  }
+
+  return [];
+};
+
+const getSavedElapsedSeconds = (rows: Record<string, unknown>[]) => {
+  const elapsedValues = rows
+    .map((row) =>
+      readNumberByAliases(row, [
+        "TotalTimeTaken",
+        "totalTimeTaken",
+        "total_time_taken",
+        "theoryTimeSeconds",
+        "theory_time_seconds",
+        "totalTime",
+        "total_time",
+        "elapsedSeconds",
+        "elapsed_seconds",
+      ]) || 0
+    )
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  return elapsedValues.length ? Math.max(...elapsedValues) : 0;
+};
+
+const getExamElapsedStorageKey = (candidateId: number | string | null | undefined, batchId: number | string | null | undefined) =>
+  candidateId && batchId ? `examElapsedSeconds:${candidateId}:${batchId}` : "";
+
+const readStoredElapsedSeconds = (candidateId: number | string | null | undefined, batchId: number | string | null | undefined) => {
+  const key = getExamElapsedStorageKey(candidateId, batchId);
+  if (!key) return 0;
+
+  const parsed = Number(localStorage.getItem(key) || sessionStorage.getItem(key));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+const saveStoredElapsedSeconds = (
+  candidateId: number | string | null | undefined,
+  batchId: number | string | null | undefined,
+  elapsedSeconds: number
+) => {
+  const key = getExamElapsedStorageKey(candidateId, batchId);
+  if (!key || !Number.isFinite(elapsedSeconds) || elapsedSeconds <= 0) return;
+
+  const nextElapsedSeconds = String(Math.max(0, Math.floor(elapsedSeconds)));
+  localStorage.setItem(key, nextElapsedSeconds);
+  sessionStorage.setItem(key, nextElapsedSeconds);
+};
+
+const clearStoredElapsedSeconds = (candidateId: number | string | null | undefined, batchId: number | string | null | undefined) => {
+  const key = getExamElapsedStorageKey(candidateId, batchId);
+  if (!key) return;
+
+  localStorage.removeItem(key);
+  sessionStorage.removeItem(key);
+};
+
+const getSavedAnswerByQuestionId = (rows: Record<string, unknown>[]) => {
+  const answerByQuestionId = new Map<number, string>();
+
+  rows
+    .slice()
+    .sort((first, second) => getResponseTimestamp(first) - getResponseTimestamp(second))
+    .forEach((row) => {
+      const questionId = readNumberByAliases(row, ["questionId", "question_id", "qid", "id"]);
+      const answer = readStringByAliases(row, ["ansId", "ans_id", "answerId", "answer_id", "selectedOption", "selected_option", "responseId", "response_id", "answer"]);
+
+      if (!questionId || !answer || ["0", "null", "undefined"].includes(answer.trim().toLowerCase())) return;
+      answerByQuestionId.set(questionId, answer);
+    });
+
+  return answerByQuestionId;
+};
+
+const applySavedResponsesToQuestions = (questions: UIQuestion[], rows: Record<string, unknown>[]) => {
+  const answerByQuestionId = getSavedAnswerByQuestionId(rows);
+  if (!answerByQuestionId.size) return questions;
+
+  return questions.map((question) => {
+    const savedAnswer = answerByQuestionId.get(question.questionId);
+    if (!savedAnswer) return question;
+
+    const answer = question.type === 2
+      ? savedAnswer.split(/[^0-9]+/).map((part) => part.trim()).filter(Boolean)
+      : savedAnswer.trim();
+
+    const answered = Array.isArray(answer) ? answer.length > 0 : answer.length > 0;
+    return {
+      ...question,
+      answer,
+      answered,
+    };
+  });
+};
+
+const getTeamMemberRowsFromPayload = (payload: unknown) => {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+
+  const record = payload as Record<string, unknown>;
+  const directData = unwrapApiData(payload);
+  if (Array.isArray(directData)) return directData;
+
+  const candidates = [
+    record.data,
+    record.result,
+    record.teamMembers,
+    record.team_members,
+    record.members,
+    record.team,
+    record.teamMemberList,
+    record.list,
+    record.rows,
+    record.items,
+    record.content,
+  ];
+  const matchedRows = candidates.find(Array.isArray);
+  if (Array.isArray(matchedRows)) return matchedRows;
+
+  for (const candidate of candidates) {
+    const nestedRows = getTeamMemberRowsFromPayload(candidate);
+    if (nestedRows.length) return nestedRows;
+  }
+
+  return [];
+};
+
+const getStoredExamTeamMembers = () => {
+  const storedValues = ["examTeamMembers", "teamMembers"]
+    .map((key) => {
+      try {
+        return JSON.parse(localStorage.getItem(key) || "[]");
+      } catch {
+        return [];
+      }
+    })
+    .filter(Array.isArray);
+
+  return storedValues.flat();
+};
+
+const normalizeExamTeamMember = (value: unknown): ExamTeamMember | null => {
+  if (!value || typeof value !== "object") return null;
+
+  const record = value as Record<string, unknown>;
+  const id = readStringByAliases(record, [
+    "id",
+    "teamMemberId",
+    "team_member_id",
+    "teamMemberID",
+    "memberId",
+    "member_id",
+    "memberID",
+    "userId",
+    "user_id",
+  ]);
+  if (!id) return null;
+
+  const name =
+    readStringByAliases(record, [
+      "name",
+      "fullName",
+      "full_name",
+      "memberName",
+      "member_name",
+      "teamMemberName",
+      "team_member_name",
+    ]) || `Member ${id}`;
+
+  return {
+    id,
+    name,
+    email: readStringByAliases(record, ["email", "memberEmail", "member_email", "teamMemberEmail", "team_member_email"]),
+  };
+};
+
+const getMemberStatusMessage = (status: string, alert: boolean) => {
+  const normalizedStatus = status.trim().toLowerCase();
+
+  if (normalizedStatus === "ok") return "Visible";
+  if (normalizedStatus === "not_visible") return "Not visible";
+  if (normalizedStatus === "unauthorized") return "Unauthorized";
+  if (normalizedStatus === "no_reference") return "No reference registered";
+  if (!normalizedStatus) return alert ? "Alert" : "Waiting for verification";
+
+  return normalizedStatus.replace(/_/g, " ");
+};
+
+const buildPendingMemberStatuses = (members: ExamTeamMember[]): MemberFaceStatus[] =>
+  members.map((member) => ({
+    teamMemberId: member.id,
+    name: member.name,
+    status: "pending",
+    alert: false,
+    message: "Waiting for verification",
+  }));
+
+const buildMemberErrorStatuses = (members: ExamTeamMember[], message: string): MemberFaceStatus[] =>
+  members.map((member) => ({
+    teamMemberId: member.id,
+    name: member.name,
+    status: "error",
+    alert: true,
+    message,
+  }));
+
+const buildMemberFaceStatuses = (
+  result: FaceVerifyResponse,
+  members: ExamTeamMember[],
+): MemberFaceStatus[] => {
+  const memberById = new Map(members.map((member) => [member.id, member]));
+
+  if (result.status === "no_reference") {
+    return members.map((member) => ({
+      teamMemberId: member.id,
+      name: member.name,
+      status: "no_reference",
+      alert: true,
+      message: "No reference registered",
+    }));
+  }
+
+  const responseMembers = result.team_members || [];
+  const responseIds = responseMembers.map((member) => String(member.team_member_id || "").trim()).filter(Boolean);
+  const allIds = Array.from(new Set([...members.map((member) => member.id), ...responseIds]));
+
+  return allIds.map((teamMemberId) => {
+    const responseMember = responseMembers.find((member) => String(member.team_member_id) === teamMemberId);
+    const knownMember = memberById.get(teamMemberId);
+    const status = responseMember?.status || "pending";
+    const alert = Boolean(responseMember?.alert);
+
+    const memberName = knownMember?.name || `Member ${teamMemberId}`;
+    const friendlyMessage = responseMember
+      ? status === "ok"
+        ? "Visible"
+        : status === "not_visible"
+          ? `${memberName} not visible`
+          : status === "unauthorized"
+            ? `${memberName} unauthorized`
+            : getMemberStatusMessage(status, alert)
+      : "Waiting for verification";
+
+    return {
+      teamMemberId,
+      name: memberName,
+      status,
+      alert,
+      score: responseMember?.score,
+      message: friendlyMessage,
+    };
+  });
 };
 
 const fetchQuestionRowsFromUrl = async (url: string) => {
@@ -477,7 +779,16 @@ const getStoredCandidateId = () => {
 
 const getStoredUserId = () => {
   const storedUserId = getDashboardUserId(getStoredDashboardUser());
-  return Number(storedUserId) || null;
+  return storedUserId ?? null;
+};
+
+const getFaceVerifyReasonMessage = (reason?: string) => {
+  const reasonMessages: Record<string, string> = {
+    user_id_required: "Unable to verify faces because the logged-in user ID is missing.",
+    invalid_image: "Face verification could not read this camera frame.",
+  };
+
+  return reasonMessages[reason || ""] || "Face verification failed.";
 };
 
 const ALREADY_SUBMITTED_MESSAGE =
@@ -504,6 +815,121 @@ const persistResolvedCandidateId = (resolvedCandidateId: number) => {
   }
 };
 
+const getLiveVideoTracks = (stream?: MediaStream | null) =>
+  stream?.getVideoTracks().filter((track) => track.readyState === "live" && track.enabled) || [];
+
+const getLiveAudioTracks = (stream?: MediaStream | null) =>
+  stream?.getAudioTracks().filter((track) => track.readyState === "live" && track.enabled) || [];
+
+const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+const waitForVideoFrame = async (video: HTMLVideoElement, timeoutMs = 2500) => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      return true;
+    }
+
+    await wait(100);
+  }
+
+  return video.videoWidth > 0 && video.videoHeight > 0;
+};
+
+const getAudioContextConstructor = () =>
+  window.AudioContext ||
+  (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext ||
+  null;
+
+const ambientAudioConstraints: MediaTrackConstraints = {
+  channelCount: { ideal: 1 },
+  sampleRate: { ideal: 48000 },
+  echoCancellation: { ideal: false },
+  noiseSuppression: { ideal: false },
+  autoGainControl: { ideal: false },
+};
+
+const applyAmbientAudioConstraints = async (track: MediaStreamTrack) => {
+  await track.applyConstraints(ambientAudioConstraints).catch(() => undefined);
+};
+
+const applyWidestCameraZoom = async (track: MediaStreamTrack) => {
+  const capabilities = track.getCapabilities?.() as MediaTrackCapabilities & {
+    zoom?: { min?: number; max?: number };
+  };
+  const minZoom = capabilities?.zoom?.min;
+
+  if (typeof minZoom !== "number") return;
+
+  await track
+    .applyConstraints({
+      advanced: [{ zoom: minZoom } as MediaTrackConstraintSet],
+    } as MediaTrackConstraints)
+    .catch(() => undefined);
+};
+
+const createVideoAudioRecordingStream = async (sourceStream: MediaStream) => {
+  const liveVideoTracks = getLiveVideoTracks(sourceStream);
+  const liveAudioTracks = getLiveAudioTracks(sourceStream);
+
+  if (!liveVideoTracks.length || !liveAudioTracks.length) return null;
+
+  const clonedVideoTracks = liveVideoTracks.map((track) => track.clone());
+  const clonedAudioTracks = liveAudioTracks.map((track) => track.clone());
+  const AudioContextConstructor = getAudioContextConstructor();
+
+  const stopClonedTracks = () => {
+    clonedVideoTracks.forEach((track) => track.stop());
+    clonedAudioTracks.forEach((track) => track.stop());
+  };
+
+  if (!AudioContextConstructor) {
+    return {
+      stream: new MediaStream([...clonedVideoTracks, ...clonedAudioTracks]),
+      cleanup: stopClonedTracks,
+    };
+  }
+
+  const audioContext = new AudioContextConstructor();
+  await audioContext.resume().catch(() => undefined);
+  const audioDestination = audioContext.createMediaStreamDestination();
+  const audioSources = clonedAudioTracks.map((track) => {
+    const sourceNode = audioContext.createMediaStreamSource(new MediaStream([track]));
+    const gainNode = audioContext.createGain();
+    gainNode.gain.value = 1;
+    sourceNode.connect(gainNode).connect(audioDestination);
+    return { sourceNode, gainNode };
+  });
+  const mixedAudioTracks = audioDestination.stream.getAudioTracks();
+  const recordingStream = new MediaStream([...clonedVideoTracks, ...mixedAudioTracks]);
+  let cleanedUp = false;
+
+  return {
+    stream: recordingStream,
+    cleanup: () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      audioSources.forEach(({ sourceNode, gainNode }) => {
+        try {
+          sourceNode.disconnect();
+          gainNode.disconnect();
+        } catch {
+          // The recorder may already have torn down the audio graph.
+        }
+      });
+      try {
+        audioDestination.disconnect();
+      } catch {
+        // Ignore browsers that report no active output connection.
+      }
+      mixedAudioTracks.forEach((track) => track.stop());
+      stopClonedTracks();
+      void audioContext.close();
+    },
+  };
+};
+
 export default function Exam() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -518,6 +944,171 @@ export default function Exam() {
   const examEndingRef = useRef(false);
   const examStartTimeRef = useRef(Date.now());
   const timeRemainingRef = useRef(0);
+  const mediaRecoveryInProgressRef = useRef(false);
+  const faceVerifyInProgressRef = useRef(false);
+  const faceVerifyErrorMessageRef = useRef<string | null>(null);
+  const faceMemberVisibleAtRef = useRef<Map<string, number>>(new Map());
+  const lastFaceSeenAtRef = useRef<number | null>(Date.now());
+  const unauthorizedStartAtRef = useRef<number | null>(null);
+  const lastFaceWarningSaveRef = useRef<Map<string, number>>(new Map());
+  const fullscreenExitActiveRef = useRef(false);
+  const examStartSyncedRef = useRef(false);
+
+  const formatFaceDuration = (ms: number) => {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    if (totalSeconds < 60) return `${totalSeconds}s`;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}m ${seconds}s`;
+  };
+
+  const getFaceMemberName = (teamMemberId: string, members: ExamTeamMember[]) => {
+    return members.find((member) => member.id === teamMemberId)?.name || `Member ${teamMemberId}`;
+  };
+
+  const updateFaceTrackingFromResult = (result: FaceVerifyResponse, members: ExamTeamMember[]) => {
+    const now = Date.now();
+    const detectedFacesCount = Number(result.detected_faces_count) || 0;
+
+    if (detectedFacesCount > 0) {
+      lastFaceSeenAtRef.current = now;
+    }
+
+    const responseMembers = result.team_members || [];
+    const apiAlerts = result.alerts || [];
+    const hasUnauthorized =
+      responseMembers.some((member) => isUnauthorizedFaceAlert(member.status)) ||
+      apiAlerts.some((alert) => isUnauthorizedFaceAlert(alert.type) || isUnauthorizedFaceAlert(alert.message));
+
+    if (hasUnauthorized) {
+      unauthorizedStartAtRef.current = unauthorizedStartAtRef.current || now;
+    } else {
+      unauthorizedStartAtRef.current = null;
+    }
+
+    responseMembers.forEach((member) => {
+      const status = String(member.status).trim().toLowerCase();
+      if (status === "ok") {
+        faceMemberVisibleAtRef.current.set(String(member.team_member_id), now);
+      }
+    });
+  };
+
+  const getMemberNotVisibleDuration = (teamMemberId: string) => {
+    const lastVisibleAt = faceMemberVisibleAtRef.current.get(teamMemberId);
+    if (!lastVisibleAt) return "since start";
+    return formatFaceDuration(Date.now() - lastVisibleAt);
+  };
+
+  const getNoFaceDuration = () => {
+    const lastFaceAt = lastFaceSeenAtRef.current;
+    if (!lastFaceAt) return "since start";
+    return formatFaceDuration(Date.now() - lastFaceAt);
+  };
+
+  const getWarningDurationMs = (startedAt?: number | null) => {
+    if (!startedAt) return 100;
+    return Math.max(100, Date.now() - startedAt);
+  };
+
+  const normalizeFaceWarningText = (value: unknown) =>
+    String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+
+  const isUnauthorizedFaceAlert = (value: unknown) => {
+    const normalizedValue = normalizeFaceWarningText(value);
+    return normalizedValue.includes("unauthorized") || normalizedValue.includes("unknown_face");
+  };
+
+  const isNoFaceAlert = (value: unknown) => {
+    const normalizedValue = normalizeFaceWarningText(value);
+    return normalizedValue.includes("no_face") || normalizedValue.includes("noface") || normalizedValue.includes("face_missing");
+  };
+
+  const getNotVisibleMemberIdsFromMessage = (message: string, members: ExamTeamMember[]) => {
+    const normalizedMessage = normalizeFaceWarningText(message);
+    if (!normalizedMessage.includes("not_visible")) return [];
+
+    return members
+      .filter((member) => {
+        const normalizedName = normalizeFaceWarningText(member.name);
+        return normalizedName && normalizedMessage.includes(normalizedName);
+      })
+      .map((member) => member.id);
+  };
+
+  const summarizeFaceVerifyResponse = (result: FaceVerifyResponse, members: ExamTeamMember[]) => {
+    const detectedFacesCount = Number(result.detected_faces_count) || 0;
+
+    if (result.status === "ok") {
+      return {
+        alert: false,
+        message: "All registered team members are visible.",
+        detectedFacesCount,
+      };
+    }
+
+    if (result.status === "no_reference") {
+      return {
+        alert: true,
+        message: "No registered face references found for this user.",
+        detectedFacesCount,
+      };
+    }
+
+    if (result.status === "error") {
+      return {
+        alert: true,
+        message: getFaceVerifyReasonMessage(result.reason),
+        detectedFacesCount,
+      };
+    }
+
+    const messages: string[] = [];
+    const responseMembers = result.team_members || [];
+    const apiAlerts = result.alerts || [];
+
+    const hasNoFaceAlert = apiAlerts.some((alert) => isNoFaceAlert(alert.type) || isNoFaceAlert(alert.message));
+
+    if (detectedFacesCount === 0 || hasNoFaceAlert) {
+      messages.push(`No face detected in frame for ${getNoFaceDuration()}`);
+    }
+
+    responseMembers.forEach((member) => {
+      const status = String(member.status).trim().toLowerCase();
+      const teamMemberId = String(member.team_member_id);
+      const name = getFaceMemberName(teamMemberId, members);
+
+      if (status === "not_visible") {
+        messages.push(`${name} not visible for ${getMemberNotVisibleDuration(teamMemberId)}`);
+      }
+
+      if (status === "unauthorized") {
+        const unauthorizedDuration = unauthorizedStartAtRef.current ? formatFaceDuration(Date.now() - unauthorizedStartAtRef.current) : "just now";
+        messages.push(`${name} unauthorized since ${unauthorizedDuration}`);
+      }
+    });
+
+    apiAlerts.forEach((alert) => {
+      const faceCount = alert.faces?.length || 0;
+      const message = alert.message || alert.type.replace(/_/g, " ");
+      if (isUnauthorizedFaceAlert(alert.type) || isUnauthorizedFaceAlert(alert.message)) {
+        const unauthorizedDuration = unauthorizedStartAtRef.current ? formatFaceDuration(Date.now() - unauthorizedStartAtRef.current) : "just now";
+        messages.push(`${message} for ${unauthorizedDuration}`);
+      } else {
+        messages.push(faceCount > 0 ? `${message} (${faceCount})` : message);
+      }
+    });
+
+    if (messages.length === 0) {
+      messages.push("Face verification alert.");
+    }
+
+    return {
+      alert: true,
+      message: messages.join(". "),
+      detectedFacesCount,
+    };
+  };
 
   const [questions, setQuestions] = useState<UIQuestion[]>([]);
   const [currentQuestion, setCurrentQuestion] = useState(0);
@@ -545,24 +1136,24 @@ export default function Exam() {
   const [showFullscreenWarning, setShowFullscreenWarning] = useState(false);
   const [showFinalFullscreenWarning, setShowFinalFullscreenWarning] = useState(false);
   const [showAnswerAlert, setShowAnswerAlert] = useState(false);
-  const [showSubmitDialog, setShowSubmitDialog] = useState(false);
   const [showCancelTestDialog, setShowCancelTestDialog] = useState(false);
   const [showSubmitSuccessPopup, setShowSubmitSuccessPopup] = useState(false);
   const [showTimeUpDialog, setShowTimeUpDialog] = useState(false);
   const [showAutoSubmitPopup, setShowAutoSubmitPopup] = useState(false);
-  const [showTabSwitchWarning, setShowTabSwitchWarning] = useState(false);
-  const [tabSwitchWarningCount, setTabSwitchWarningCount] = useState(0);
   const [autoSubmitReason, setAutoSubmitReason] = useState("");
   const [autoSubmitInProgress, setAutoSubmitInProgress] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [examFrozen, setExamFrozen] = useState(false);
+  const [mediaPermissionBlocked, setMediaPermissionBlocked] = useState(false);
+  const [permissionRetrying, setPermissionRetrying] = useState(false);
 
   const [tabSwitchCount, setTabSwitchCount] = useState(0);
   const [maxTabSwitchCount] = useState(10);
   const [fullscreenExitCount, setFullscreenExitCount] = useState(0);
   const [maxFullscreenViolations] = useState(3);
   const [faceAlert, setFaceAlert] = useState<{ message: string; duration: number } | null>(null);
-  const [faceCount, setFaceCount] = useState(0);
+  const [faceTeamMembers, setFaceTeamMembers] = useState<ExamTeamMember[]>([]);
+  const [memberFaceStatuses, setMemberFaceStatuses] = useState<MemberFaceStatus[]>([]);
   const [totalVideoChunks, setTotalVideoChunks] = useState(0);
   const [recordedVideos, setRecordedVideos] = useState<Array<{ minute: number; timestamp: Date; filename: string; uploaded: boolean; url?: string; mimeType?: string }>>([]);
   const [capturedSelfies, setCapturedSelfies] = useState<Array<{ timestamp: Date; filename: string; url?: string; uploaded: boolean; mimeType?: string }>>([]);
@@ -588,10 +1179,60 @@ export default function Exam() {
     { label: "Flagged", value: flaggedCount, className: "bg-red-500" },
     { label: "Pending", value: pendingCount, className: "bg-slate-200" },
   ];
+  const visibleMemberFaceStatuses = useMemo(
+    () => memberFaceStatuses.length ? memberFaceStatuses : buildPendingMemberStatuses(faceTeamMembers),
+    [faceTeamMembers, memberFaceStatuses],
+  );
+
+  const saveFaceWarningToBackend = useCallback(
+    async (warningType: string, memberName?: string, duration?: number, details?: string, memberId?: string) => {
+      const now = Date.now();
+      const warningKey = [warningType, memberId || memberName || "candidate"].join(":");
+      const lastSavedAt = lastFaceWarningSaveRef.current.get(warningKey) || 0;
+      // Avoid duplicate saves for the same warning/member, while allowing other warnings from the same frame.
+      if (now - lastSavedAt < 5000) return;
+
+      const userId = Number(getStoredUserId()) || undefined;
+      const cId = candidateId || Number(localStorage.getItem("candidateId")) || getStoredCandidateId() || undefined;
+      if ((!cId && !userId) || !batchId) return;
+
+      lastFaceWarningSaveRef.current.set(warningKey, now);
+
+      try {
+        const warningDetails = memberId ? `memberId=${memberId}${details ? ` | ${details}` : ""}` : details;
+        const warningRequest: FaceWarningRequest = {
+          userId,
+          candidateId: cId,
+          batchId: batchId,
+          warningType,
+          memberName,
+          duration,
+          timestamp: new Date().toISOString(),
+          details: warningDetails,
+        };
+        await saveFaceWarning(warningRequest);
+      } catch (error) {
+        lastFaceWarningSaveRef.current.delete(warningKey);
+        console.warn("Failed to save face warning:", error);
+      }
+    },
+    [candidateId, batchId],
+  );
 
   useEffect(() => {
     timeRemainingRef.current = timeRemaining;
   }, [timeRemaining]);
+
+  useEffect(() => {
+    if (!examStarted || examEndingRef.current) return;
+
+    const activeCandidateId = candidateId || Number(localStorage.getItem("candidateId")) || getStoredCandidateId();
+    const activeBatchId = batchId || Number(localStorage.getItem("batchId")) || null;
+    const totalDurationSeconds = examDurationMinutes * 60;
+    const elapsedSeconds = Math.max(0, totalDurationSeconds - timeRemaining);
+
+    saveStoredElapsedSeconds(activeCandidateId, activeBatchId, elapsedSeconds);
+  }, [batchId, candidateId, examDurationMinutes, examStarted, timeRemaining]);
 
   const readStoredUser = () => {
     const userData = localStorage.getItem("userData");
@@ -601,6 +1242,74 @@ export default function Exam() {
       return {};
     }
   };
+
+  useEffect(() => {
+    let isActive = true;
+
+    const fetchFaceTeamMembers = async () => {
+      try {
+        const storedUserId = getStoredUserId();
+        const urls = Array.from(new Set([
+          `${BASE_URL1}/register/get/team`,
+          storedUserId ? `${BASE_URL1}/register/get/team/public/${encodeURIComponent(String(storedUserId))}` : "",
+          storedUserId ? `${BASE_URL1}/register/get/team/${encodeURIComponent(String(storedUserId))}` : "",
+          storedUserId ? `${BASE_URL1}/register/get/team?userId=${encodeURIComponent(String(storedUserId))}` : "",
+        ].filter(Boolean)));
+        const memberMap = new Map<string, ExamTeamMember>();
+        let lastError: unknown = null;
+
+        getStoredExamTeamMembers()
+          .map(normalizeExamTeamMember)
+          .filter((member): member is ExamTeamMember => Boolean(member))
+          .forEach((member) => {
+            const key = `${member.id || ""}|${member.name.toLowerCase()}`;
+            memberMap.set(key, member);
+          });
+
+        for (const url of urls) {
+          try {
+            const response = await fetch(url, getAuthFetchOptions());
+            const payload = await parseJsonResponse(response);
+
+            if (!response.ok) {
+              lastError = new Error(`Team member request failed with status ${response.status}`);
+              continue;
+            }
+
+            getTeamMemberRowsFromPayload(payload)
+              .map(normalizeExamTeamMember)
+              .filter((member): member is ExamTeamMember => Boolean(member))
+              .forEach((member) => {
+                const key = `${member.id || ""}|${member.name.toLowerCase()}`;
+                memberMap.set(key, member);
+              });
+          } catch (error) {
+            lastError = error;
+          }
+        }
+
+        const members = Array.from(memberMap.values());
+        if (!members.length && lastError) throw lastError;
+
+        if (!isActive) return;
+
+        setFaceTeamMembers(members);
+        setMemberFaceStatuses(
+          faceVerifyErrorMessageRef.current
+            ? buildMemberErrorStatuses(members, "Face API error")
+            : buildPendingMemberStatuses(members),
+        );
+      } catch (error) {
+        console.warn("Unable to load team members for face verification:", error);
+      }
+    };
+
+    void fetchFaceTeamMembers();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
 
   const findEnrolledBatchForUser = useCallback(async (
     levelHint: string,
@@ -620,7 +1329,7 @@ export default function Exam() {
     if (!email && !enrollmentNo && !storedCandidateId) return null;
 
     const normalizedLevelHint = normalizeLevelValue(levelHint) || "district";
-    const levels = Array.from(new Set([normalizedLevelHint, "district", "state", "national"]));
+    const levels = Array.from(new Set([normalizedLevelHint, "district", "regional", "state", "national"]));
     const normalizedPreferredBatchCode = normalizeNameForMatch(preferredBatchCode);
     const matchedEnrollments: Array<{
       batch: Batch;
@@ -851,7 +1560,7 @@ return {
           }
         }
       } catch (error) {
-        console.error("Failed to load batch details:", error);
+        console.error("Failed to load exam details:", error);
       }
 
       return resolvedBatchDetails;
@@ -974,7 +1683,7 @@ return {
   if (!resolvedBatchId) {
     setExamValidationFailed(true);
     setValidationMessage(
-      "you are not enrolled in this batch please connect with admin ."
+      "You are not enrolled in this exam. Please connect with admin."
     );
     setLoading(false);
     return null;
@@ -1022,13 +1731,29 @@ return {
     }
   }
 
+  const totalDurationSeconds = duration * 60;
+  let elapsedSeconds = 0;
+
+  if (resolvedCandidateId) {
+    const savedResponseRows = await fetchSavedCandidateResponses(resolvedCandidateId);
+    elapsedSeconds = Math.min(
+      totalDurationSeconds,
+      Math.max(
+        getSavedElapsedSeconds(savedResponseRows),
+        readStoredElapsedSeconds(resolvedCandidateId, resolvedBatchId)
+      )
+    );
+  }
+
+  examStartTimeRef.current = Date.now() - elapsedSeconds * 1000;
   setExamDurationMinutes(duration);
-  setTimeRemaining(duration * 60);
+  setTimeRemaining(Math.max(0, totalDurationSeconds - elapsedSeconds));
   setMinSubmitTime(2);
 
   return {
     batchId: resolvedBatchId,
     batch: resolvedBatchDetails,
+    candidateId: resolvedCandidateId || null,
   };
 }, [fetchBatchDetailsById, getExamParams, mergeCandidateQuestionBank]);
 
@@ -1064,17 +1789,19 @@ const normalizeOptionValue = (value: unknown) => {
 
   if (typeof value === "object") {
     const optionRecord = value as Record<string, unknown>;
-    return String(
-      optionRecord.text ||
-        optionRecord.option ||
-        optionRecord.value ||
-        optionRecord.label ||
-        optionRecord.name ||
-        "",
-    ).trim();
+    return normalizeTemperatureText(
+      String(
+        optionRecord.text ||
+          optionRecord.option ||
+          optionRecord.value ||
+          optionRecord.label ||
+          optionRecord.name ||
+          "",
+      ).trim(),
+    );
   }
 
-  return String(value).trim();
+  return normalizeTemperatureText(String(value).trim());
 };
 
 const isMeaningfulOption = (value: string) =>
@@ -1133,7 +1860,7 @@ const getQuestionOptions = (q: ApiQuestion, type: number) => {
   return {
     id: index + 1,
     questionId,
-    question: q.text || q.question || q.questionText || `Question ${index + 1}`,
+    question: normalizeTemperatureText(q.text || q.question || q.questionText || `Question ${index + 1}`),
     options,
     type,
     answered: false,
@@ -1143,10 +1870,10 @@ const getQuestionOptions = (q: ApiQuestion, type: number) => {
   };
 };
 
-const loadQuestions = useCallback(async (resolvedBatchId: number, questionBankId?: number) => {
+const loadQuestions = useCallback(async (resolvedBatchId: number, questionBankId?: number, resumeCandidateId?: number | null) => {
   try {
     if (!resolvedBatchId) {
-      throw new Error("Batch ID missing");
+      throw new Error("Exam ID missing");
     }
 
     const fetchOptions = getAuthFetchOptions();
@@ -1199,14 +1926,20 @@ const loadQuestions = useCallback(async (resolvedBatchId: number, questionBankId
     if (!formatted.length) {
       throw new Error(
         questionBankId
-          ? "No questions found in this batch's linked question bank. Please check the question bank questions."
-          : "No questions found for this batch. Please check the linked question bank questions."
+          ? "No questions found in this exam's linked question bank. Please check the question bank questions."
+          : "No questions found for this exam. Please check the linked question bank questions."
       );
     }
 
-    setQuestions(formatted);
-    setCurrentQuestion(0);
-    setSelectedAnswer(formatted[0]?.type === 2 ? [] : "");
+    const savedResponseRows = resumeCandidateId ? await fetchSavedCandidateResponses(resumeCandidateId) : [];
+    const nextQuestions = applySavedResponsesToQuestions(formatted, savedResponseRows);
+    const firstUnansweredIndex = Math.max(0, nextQuestions.findIndex((question) => !question.answered));
+    const nextQuestionIndex = firstUnansweredIndex === -1 ? 0 : firstUnansweredIndex;
+    const nextSelectedAnswer = nextQuestions[nextQuestionIndex]?.answer ?? (nextQuestions[nextQuestionIndex]?.type === 2 ? [] : "");
+
+    setQuestions(nextQuestions);
+    setCurrentQuestion(nextQuestionIndex);
+    setSelectedAnswer(nextSelectedAnswer);
   } catch (error: unknown) {
     setExamValidationFailed(true);
     setValidationMessage(
@@ -1258,6 +1991,23 @@ useEffect(() => {
     if (!isActive) return;
 
     const candidateInfo = await loadCandidateInfo();
+
+    if (!examStartSyncedRef.current) {
+      examStartSyncedRef.current = true;
+      try {
+        await startDashboardExam(candidateInfo?.batch?.level || localStorage.getItem("level") || undefined);
+      } catch (startError) {
+        const message = startError instanceof Error ? startError.message : "";
+        if (message && message.toLowerCase().includes("already")) {
+          setExamValidationFailed(true);
+          setValidationMessage(ALREADY_SUBMITTED_MESSAGE);
+          setLoading(false);
+          return;
+        }
+        console.warn("Unable to mark exam as started:", startError);
+      }
+    }
+
     const resolvedBatchId = candidateInfo?.batchId || null;
     let questionBankId = getBatchQuestionBankId(candidateInfo?.batch);
 
@@ -1275,10 +2025,12 @@ useEffect(() => {
 
     if (!isActive) return;
 
+    const resumeCandidateId = candidateInfo?.candidateId || getStoredCandidateId();
+
     if (resolvedBatchId && questionBankId) {
-      await loadQuestions(resolvedBatchId, questionBankId);
+      await loadQuestions(resolvedBatchId, questionBankId, resumeCandidateId);
     } else if (resolvedBatchId) {
-      await loadQuestions(resolvedBatchId);
+      await loadQuestions(resolvedBatchId, undefined, resumeCandidateId);
     }
   };
 
@@ -1322,6 +2074,8 @@ useEffect(() => {
       }
 
       const teamMemberName = candidateName || localStorage.getItem("userName") || "Candidate";
+      const mimeType = file.type || (type === "video" ? "video/webm" : PNG_MIME_TYPE);
+      const fileExtension = getFileExtensionFromMimeType(mimeType);
       const formData = new FormData();
 
       formData.append("file", file, fileName);
@@ -1329,6 +2083,14 @@ useEffect(() => {
       formData.append("teamMemberName", teamMemberName);
       formData.append("type", type);
       formData.append("batchCode", resolvedBatchCode);
+      formData.append("mimeType", mimeType);
+      formData.append("fileExtension", fileExtension);
+      formData.append("storageFormat", fileExtension);
+      if (type === "video") {
+        formData.append("hasAudio", "true");
+        formData.append("audioCodec", "opus");
+        formData.append("videoContainer", "webm");
+      }
       formData.append("uploadedAt", uploadAudit.uploadedAt);
       formData.append("uploadDate", uploadAudit.uploadDate);
       formData.append("uploadTime", uploadAudit.uploadTime);
@@ -1415,27 +2177,6 @@ useEffect(() => {
   }, [faceAlert]);
 
   useEffect(() => {
-    if (!showTabSwitchWarning) return;
-
-    const timer = setTimeout(() => {
-      setShowTabSwitchWarning(false);
-    }, 3000);
-
-    return () => clearTimeout(timer);
-  }, [showTabSwitchWarning, tabSwitchWarningCount]);
-
-  useEffect(() => {
-    if (!examStarted || cameraState !== "active") return;
-
-    const interval = setInterval(() => {
-      if (document.hidden) return;
-      setFaceCount((prev) => prev + 1);
-    }, 7000);
-
-    return () => clearInterval(interval);
-  }, [cameraState, examStarted]);
-
-  useEffect(() => {
     if (!examStarted) return;
 
     let lastSwitchTime = 0;
@@ -1447,7 +2188,6 @@ useEffect(() => {
       setTabSwitchCount((prev) => {
         const next = prev + 1;
         if (next >= maxTabSwitchCount) {
-          setShowTabSwitchWarning(false);
           setAutoSubmitReason(`Maximum tab switches (${maxTabSwitchCount}) exceeded`);
           setShowAutoSubmitPopup(true);
           setTimeout(() => {
@@ -1455,8 +2195,10 @@ useEffect(() => {
             handleAutoSubmit();
           }, 2500);
         } else {
-          setTabSwitchWarningCount(next);
-          setShowTabSwitchWarning(true);
+          setFaceAlert({
+            message: `Tab switch detected (${next}). Please stay on the exam screen.`,
+            duration: 3,
+          });
         }
         return next;
       });
@@ -1469,34 +2211,49 @@ useEffect(() => {
   useEffect(() => {
     if (!examStarted) return;
 
-    const handleFullscreenChange = () => {
-      const isFullscreen = !!document.fullscreenElement;
+    const triggerFullscreenExit = () => {
+      if (document.fullscreenElement || examEndingRef.current) return;
 
-      if (!isFullscreen && !showSubmitDialog && !showCancelTestDialog && !showTimeUpDialog && !examEndingRef.current) {
-        setFullscreenExitCount((prev) => {
-          const next = prev + 1;
-          if (next >= maxFullscreenViolations) {
-            setShowFinalFullscreenWarning(true);
-            setExamFrozen(true);
-            setTimeout(() => {
-              if (!document.fullscreenElement && !examEndingRef.current) {
-                setAutoSubmitReason(`Fullscreen violation (${maxFullscreenViolations} times exceeded)`);
-                setShowAutoSubmitPopup(true);
-                setTimeout(() => {
-                  setShowAutoSubmitPopup(false);
-                  handleAutoSubmit();
-                }, 2500);
-              }
-            }, 5000);
-          } else {
-            setShowFullscreenWarning(true);
-            setExamFrozen(true);
-          }
-          return next;
-        });
+      setExamFrozen(true);
+
+      if (fullscreenExitActiveRef.current) return;
+      fullscreenExitActiveRef.current = true;
+
+      setFullscreenExitCount((prev) => {
+        const next = prev + 1;
+        if (next >= maxFullscreenViolations) {
+          setShowFullscreenWarning(false);
+          setShowFinalFullscreenWarning(true);
+          setTimeout(() => {
+            if (!document.fullscreenElement && !examEndingRef.current) {
+              setAutoSubmitReason(`Fullscreen violation (${maxFullscreenViolations} times exceeded)`);
+              setShowAutoSubmitPopup(true);
+              setTimeout(() => {
+                setShowAutoSubmitPopup(false);
+                handleAutoSubmit();
+              }, 2500);
+            }
+          }, 5000);
+        } else {
+          setShowFullscreenWarning(true);
+          setExamFrozen(true);
+        }
+        return next;
+      });
+    };
+
+    const handleFullscreenChange = () => {
+      const isFullscreen = Boolean(document.fullscreenElement);
+
+      if (!isFullscreen) {
+        triggerFullscreenExit();
+        return;
       }
 
-      if (isFullscreen) {
+      fullscreenExitActiveRef.current = false;
+      setShowFullscreenWarning(false);
+
+      if (!mediaPermissionBlocked) {
         setExamFrozen(false);
       }
     };
@@ -1524,20 +2281,27 @@ useEffect(() => {
     };
 
     document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    document.addEventListener("mozfullscreenchange", handleFullscreenChange);
+    document.addEventListener("MSFullscreenChange", handleFullscreenChange);
     document.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("beforeunload", handleBeforeUnload);
+    const fullscreenGuard = window.setInterval(triggerFullscreenExit, 500);
+    triggerFullscreenExit();
 
     return () => {
+      window.clearInterval(fullscreenGuard);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("mozfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("MSFullscreenChange", handleFullscreenChange);
       document.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
   }, [
     examStarted,
     maxFullscreenViolations,
-    showCancelTestDialog,
-    showSubmitDialog,
-    showTimeUpDialog,
+    mediaPermissionBlocked,
   ]);
 
   useEffect(() => {
@@ -1589,11 +2353,19 @@ useEffect(() => {
 
   const startCamera = useCallback(async () => {
     const activeStream = mediaStreamRef.current;
-    if (activeStream?.getTracks().some((track) => track.readyState === "live")) {
+    const hasLiveVideo = getLiveVideoTracks(activeStream).length > 0;
+    const hasLiveAudio = getLiveAudioTracks(activeStream).length > 0;
+
+    if (activeStream && hasLiveVideo && hasLiveAudio) {
       await attachStreamToVideo(activeStream);
       setCameraState("active");
-      return;
+      setMediaPermissionBlocked(false);
+      if (!examStarted || document.fullscreenElement) setExamFrozen(false);
+      return true;
     }
+
+    activeStream?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
 
     setCameraState("requesting");
     setErrorDetails("");
@@ -1602,25 +2374,45 @@ useEffect(() => {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "user",
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
+          aspectRatio: { ideal: 16 / 9 },
           frameRate: { ideal: 30 },
         },
-        audio: false,
+        audio: ambientAudioConstraints,
       });
+
+      const liveVideoTracks = getLiveVideoTracks(stream);
+      const liveAudioTracks = getLiveAudioTracks(stream);
+
+      if (!liveVideoTracks.length || !liveAudioTracks.length) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error("Camera and microphone permission is required for exam recording.");
+      }
+
+      await Promise.all(liveAudioTracks.map(applyAmbientAudioConstraints));
+      await Promise.all(liveVideoTracks.map(applyWidestCameraZoom));
 
       mediaStreamRef.current = stream;
       await attachStreamToVideo(stream);
 
       setCameraState("active");
-    } catch {
+      setMediaPermissionBlocked(false);
+      if (!examStarted || document.fullscreenElement) setExamFrozen(false);
+      return true;
+    } catch (error) {
       setCameraState("error");
-      setErrorDetails("Camera access failed. Please check browser permissions.");
+      setErrorDetails(
+        error instanceof Error
+          ? error.message
+          : "Camera or microphone access failed. Please check browser permissions.",
+      );
+      return false;
     }
-  }, [attachStreamToVideo]);
+  }, [attachStreamToVideo, examStarted]);
 
   useEffect(() => {
-    startCamera();
+    void startCamera();
   }, [startCamera]);
 
   useEffect(() => {
@@ -1636,11 +2428,135 @@ useEffect(() => {
       return;
     }
 
-    await startCamera();
+    const mediaReady = await startCamera();
+    if (!getLiveVideoTracks(mediaStreamRef.current).length || !getLiveAudioTracks(mediaStreamRef.current).length) {
+      setMediaPermissionBlocked(true);
+      setShowStartFullscreenDialog(true);
+      return;
+    }
+    if (!mediaReady) {
+      setMediaPermissionBlocked(true);
+      setShowStartFullscreenDialog(true);
+      return;
+    }
+
     setExamStarted(true);
+    setMediaPermissionBlocked(false);
+    setExamFrozen(false);
     setShowStartFullscreenDialog(false);
     examStartTimeRef.current = Date.now();
   }, [requestFullscreen, startCamera]);
+
+  const freezeForMediaPermission = useCallback((message?: string) => {
+    if (examEndingRef.current) return;
+
+    setMediaPermissionBlocked(true);
+    setExamFrozen(true);
+    setCameraState("error");
+    setErrorDetails(
+      message ||
+        "Camera or microphone permission is missing. Please allow both permissions to continue the exam.",
+    );
+  }, []);
+
+  const recoverExamMediaPermission = useCallback(async () => {
+    if (mediaRecoveryInProgressRef.current || examEndingRef.current) return false;
+
+    mediaRecoveryInProgressRef.current = true;
+    setPermissionRetrying(true);
+
+    try {
+      const recovered = await startCamera();
+      const hasLiveMedia =
+        recovered &&
+        getLiveVideoTracks(mediaStreamRef.current).length > 0 &&
+        getLiveAudioTracks(mediaStreamRef.current).length > 0;
+
+      if (hasLiveMedia) {
+        setMediaPermissionBlocked(false);
+        setErrorDetails("");
+        setCameraState("active");
+        if (document.fullscreenElement) setExamFrozen(false);
+        return true;
+      }
+
+      freezeForMediaPermission();
+      return false;
+    } finally {
+      mediaRecoveryInProgressRef.current = false;
+      setPermissionRetrying(false);
+    }
+  }, [freezeForMediaPermission, startCamera]);
+
+  const handleFrozenRecovery = useCallback(async () => {
+    if (mediaPermissionBlocked) {
+      const recovered = await recoverExamMediaPermission();
+      if (recovered && !document.fullscreenElement) {
+        const isFullscreen = await requestFullscreen();
+        if (!isFullscreen && !document.fullscreenElement) {
+          setExamFrozen(true);
+          setShowFullscreenWarning(true);
+        }
+      }
+      return;
+    }
+
+    const isFullscreen = await requestFullscreen();
+    if (isFullscreen || document.fullscreenElement) {
+      setShowFullscreenWarning(false);
+      setExamFrozen(false);
+    } else {
+      setExamFrozen(true);
+      setShowFullscreenWarning(true);
+    }
+  }, [mediaPermissionBlocked, recoverExamMediaPermission, requestFullscreen]);
+
+  useEffect(() => {
+    if (!examStarted || examEndingRef.current) return;
+
+    const verifyExamMedia = async () => {
+      if (examEndingRef.current) return;
+
+      const hasLiveMedia =
+        getLiveVideoTracks(mediaStreamRef.current).length > 0 &&
+        getLiveAudioTracks(mediaStreamRef.current).length > 0;
+
+      if (hasLiveMedia) {
+        if (mediaPermissionBlocked) {
+          setMediaPermissionBlocked(false);
+          if (document.fullscreenElement) setExamFrozen(false);
+        }
+        return;
+      }
+
+      freezeForMediaPermission(
+        "Camera or microphone permission was removed during the exam. Timer will continue; allow permissions to resume.",
+      );
+      await recoverExamMediaPermission();
+    };
+
+    const currentTracks = mediaStreamRef.current?.getTracks() || [];
+    currentTracks.forEach((track) => {
+      track.onended = () => {
+        void verifyExamMedia();
+      };
+      track.onmute = () => {
+        void verifyExamMedia();
+      };
+    });
+
+    const interval = window.setInterval(() => {
+      void verifyExamMedia();
+    }, 2500);
+
+    return () => {
+      window.clearInterval(interval);
+      currentTracks.forEach((track) => {
+        track.onended = null;
+        track.onmute = null;
+      });
+    };
+  }, [examStarted, freezeForMediaPermission, mediaPermissionBlocked, recoverExamMediaPermission]);
 
   const updateCurrentQuestionAnswer = useCallback(
     (answer: string | string[]) => {
@@ -1899,7 +2815,7 @@ useEffect(() => {
 
   // ✅ FIXED saveAnswers function - 403 Error Solution
   const saveAnswers = useCallback(
-    async (isFinalSubmit = false, isAutoSubmit = false) => {
+    async (isFinalSubmit = false, isAutoSubmit = false, forceInProgress = false) => {
       if (!examStarted && !isAutoSubmit) return false;
 
       setIsSaving(true);
@@ -1917,7 +2833,7 @@ useEffect(() => {
           return false;
         }
         if (!resolvedBatchCode) {
-          console.error(" Batch code missing");
+          console.error("Exam code missing");
           setIsSaving(false);
           return false;
         }
@@ -1961,14 +2877,20 @@ useEffect(() => {
 
         const answer = getAnswerForSave(currentQ);
 
-        if (!answer && !isFinalSubmit && !isAutoSubmit) {
+        if (!answer && !isFinalSubmit && !isAutoSubmit && !forceInProgress) {
           setIsSaving(false);
           return true;
         }
 
         const submittedAt = new Date().toISOString();
         const totalTimeTaken = examDurationMinutes * 60 - timeRemainingRef.current;
-        const isCompletedSubmit = isFinalSubmit || isAutoSubmit;
+        const isCompletedSubmit = (isFinalSubmit || isAutoSubmit) && !forceInProgress;
+        const finalBatchId = batchId || Number(localStorage.getItem("batchId")) || null;
+        if (isCompletedSubmit) {
+          clearStoredElapsedSeconds(finalCandidateId, finalBatchId);
+        } else {
+          saveStoredElapsedSeconds(finalCandidateId, finalBatchId, totalTimeTaken);
+        }
         const finalScore = isCompletedSubmit
           ? effectiveQuestions.reduce((total, question) => {
               const marks = getCorrectnessState(question, getAnswerForSave(question)).marks;
@@ -1983,7 +2905,7 @@ useEffect(() => {
           batchCode: resolvedBatchCode,
           tabSwitchCount,
           isActive: true,
-          isFinalSubmit,
+          isFinalSubmit: isCompletedSubmit,
           isAutoSubmit,
           quizStatus: isCompletedSubmit ? "COMPLETED" : "IN_PROGRESS",
           examStatus: isCompletedSubmit ? "COMPLETED" : "IN_PROGRESS",
@@ -2105,6 +3027,7 @@ useEffect(() => {
     [
       examStarted,
       candidateId,
+      batchId,
       batchCode,
       batchDetails?.level,
       tabSwitchCount,
@@ -2155,6 +3078,172 @@ useEffect(() => {
     return () => window.removeEventListener("popstate", handleExamBack);
   }, [location.pathname, logoutFromExamHistory]);
 
+  const captureFaceVerificationFrame = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video) return null;
+
+    const hasVideoFrame = await waitForVideoFrame(video);
+    if (!hasVideoFrame) return null;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await canvasToBlob(canvas, JPEG_MIME_TYPE, 0.9);
+    return blobToDataUrl(blob);
+  }, []);
+
+  const verifyCapturedFaceFrame = useCallback(
+    async (imageBase64: string) => {
+      const faceUserId = getStoredUserId();
+
+      if (!faceUserId) {
+        const message = "Unable to verify faces because the logged-in user ID is missing.";
+        faceVerifyErrorMessageRef.current = message;
+        setFaceAlert({ message, duration: 3 });
+        setMemberFaceStatuses(buildMemberErrorStatuses(faceTeamMembers, "User ID missing"));
+        throw new Error(message);
+      }
+
+      try {
+        const result = await verifyFaceFrame({
+          user_id: String(faceUserId),
+          imageBase64,
+        });
+
+        updateFaceTrackingFromResult(result, faceTeamMembers);
+        const summary = summarizeFaceVerifyResponse(result, faceTeamMembers);
+
+        faceVerifyErrorMessageRef.current = null;
+        setMemberFaceStatuses(buildMemberFaceStatuses(result, faceTeamMembers));
+        setFaceAlert(summary.alert ? { message: summary.message, duration: 3 } : null);
+
+        if (summary.alert) {
+          const responseMembers = result.team_members || [];
+          const apiAlerts = result.alerts || [];
+          const hasUnauthorizedMember = responseMembers.some((member) => isUnauthorizedFaceAlert(member.status));
+          const hasUnauthorizedAlert = apiAlerts.some((alert) => isUnauthorizedFaceAlert(alert.type) || isUnauthorizedFaceAlert(alert.message));
+          const hasNoFaceAlert =
+            summary.detectedFacesCount === 0 ||
+            apiAlerts.some((alert) => isNoFaceAlert(alert.type) || isNoFaceAlert(alert.message));
+          const hasMissingExpectedMember =
+            faceTeamMembers.length > 0 &&
+            responseMembers.length > 0 &&
+            responseMembers.length < faceTeamMembers.length;
+          const notVisibleMemberIds = new Set<string>();
+          const okMemberIds = new Set<string>();
+
+          responseMembers.forEach((member) => {
+            const status = String(member.status).trim().toLowerCase();
+            const teamMemberId = String(member.team_member_id);
+            const memberName = getFaceMemberName(teamMemberId, faceTeamMembers);
+
+            if (status === "ok") {
+              okMemberIds.add(teamMemberId);
+            }
+
+            if (status === "not_visible") {
+              notVisibleMemberIds.add(teamMemberId);
+            }
+
+            if (isUnauthorizedFaceAlert(status)) {
+              const unauthorizedDuration = unauthorizedStartAtRef.current ? getWarningDurationMs(unauthorizedStartAtRef.current) : undefined;
+              void saveFaceWarningToBackend("UNAUTHORIZED", memberName, unauthorizedDuration, summary.message, teamMemberId);
+            }
+          });
+
+          getNotVisibleMemberIdsFromMessage(summary.message, faceTeamMembers).forEach((teamMemberId) => {
+            notVisibleMemberIds.add(teamMemberId);
+          });
+
+          if (notVisibleMemberIds.size > 0 || hasNoFaceAlert || hasMissingExpectedMember) {
+            faceTeamMembers.forEach((member) => {
+              if (!okMemberIds.has(member.id)) {
+                notVisibleMemberIds.add(member.id);
+              }
+            });
+          }
+
+          notVisibleMemberIds.forEach((teamMemberId) => {
+            const memberName = getFaceMemberName(teamMemberId, faceTeamMembers);
+            void saveFaceWarningToBackend(
+              "NOT_VISIBLE",
+              memberName,
+              getWarningDurationMs(faceMemberVisibleAtRef.current.get(teamMemberId)),
+              summary.message,
+              teamMemberId
+            );
+          });
+
+          if (!hasUnauthorizedMember && hasUnauthorizedAlert) {
+            const unauthorizedDuration = unauthorizedStartAtRef.current ? getWarningDurationMs(unauthorizedStartAtRef.current) : undefined;
+            void saveFaceWarningToBackend("UNAUTHORIZED", "Unauthorized Face", unauthorizedDuration, summary.message);
+          }
+
+          if (hasNoFaceAlert) {
+            void saveFaceWarningToBackend("NO_FACE", "Candidate", getWarningDurationMs(lastFaceSeenAtRef.current), summary.message);
+          }
+        }
+
+        return true;
+      } catch (error) {
+        console.error("Face verification failed:", error);
+        const message = error instanceof Error ? error.message : FACE_API_INACTIVE_MESSAGE;
+        faceVerifyErrorMessageRef.current = message;
+        setFaceAlert({
+          message,
+          duration: 3,
+        });
+        setMemberFaceStatuses(buildMemberErrorStatuses(faceTeamMembers, "Face API error"));
+        void saveFaceWarningToBackend("API_ERROR", undefined, undefined, message);
+        throw error instanceof Error ? error : new Error(FACE_API_INACTIVE_MESSAGE);
+      }
+    },
+    [faceTeamMembers, saveFaceWarningToBackend],
+  );
+
+  useEffect(() => {
+    if (!examStarted || cameraState !== "active" || examEndingRef.current) return;
+
+    let isActive = true;
+
+    const runFaceVerify = async () => {
+      if (!isActive || examEndingRef.current || faceVerifyInProgressRef.current) return;
+
+      faceVerifyInProgressRef.current = true;
+
+      try {
+        const imageBase64 = await captureFaceVerificationFrame();
+        if (imageBase64) {
+          await verifyCapturedFaceFrame(imageBase64);
+        } else if (isActive && !examEndingRef.current) {
+          window.setTimeout(() => {
+            void runFaceVerify();
+          }, 500);
+        }
+      } catch {
+        // verifyCapturedFaceFrame already shows the face API error.
+      } finally {
+        faceVerifyInProgressRef.current = false;
+      }
+    };
+
+    void runFaceVerify();
+    const interval = window.setInterval(() => {
+      void runFaceVerify();
+    }, 6000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+      faceVerifyInProgressRef.current = false;
+    };
+  }, [cameraState, captureFaceVerificationFrame, examStarted, verifyCapturedFaceFrame]);
+
   const handleAutoSubmit = useCallback(async () => {
     if (examEndingRef.current) return;
 
@@ -2194,8 +3283,8 @@ useEffect(() => {
       if (!ctx) return;
 
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const blob = await canvasToBlob(canvas, PNG_MIME_TYPE);
-      const mimeType = blob.type || PNG_MIME_TYPE;
+      const blob = await canvasToBlob(canvas, JPEG_MIME_TYPE, 0.9);
+      const mimeType = blob.type || JPEG_MIME_TYPE;
       const fileName = createMediaFileName("photo", mimeType, minute);
 
       const url = URL.createObjectURL(blob);
@@ -2223,12 +3312,65 @@ useEffect(() => {
 
       processedVideoMinutesRef.current.add(minute);
       recordedChunksRef.current = [];
+      let recordingMedia: Awaited<ReturnType<typeof createVideoAudioRecordingStream>> | null = null;
 
       try {
-        const mimeType = getPreferredVideoMimeType();
-        const recorder = new MediaRecorder(mediaStreamRef.current, {
+        let activeStream = mediaStreamRef.current;
+        let liveVideoTracks = getLiveVideoTracks(activeStream);
+        let liveAudioTracks = getLiveAudioTracks(activeStream);
+
+        if (!liveVideoTracks.length || !liveAudioTracks.length) {
+          await startCamera();
+          activeStream = mediaStreamRef.current;
+          liveVideoTracks = getLiveVideoTracks(activeStream);
+          liveAudioTracks = getLiveAudioTracks(activeStream);
+        }
+
+        if (!liveVideoTracks.length || !liveAudioTracks.length) {
+          setCameraState("error");
+          setErrorDetails("Microphone is not active. Please allow camera and microphone access, then restart the exam.");
+          processedVideoMinutesRef.current.delete(minute);
+          return;
+        }
+
+        recordingMedia = await createVideoAudioRecordingStream(activeStream);
+        if (!recordingMedia) {
+          setCameraState("error");
+          setErrorDetails("Camera and microphone are required for video recording with audio.");
+          processedVideoMinutesRef.current.delete(minute);
+          return;
+        }
+
+        const mimeType = getPreferredVideoMimeType(true);
+        if (!mimeType || !mimeType.toLowerCase().includes("webm")) {
+          throw new Error("WebM audio/video recording is not supported in this browser.");
+        }
+
+        const recorderOptions: MediaRecorderOptions = {
           mimeType,
           videoBitsPerSecond: 800_000,
+          audioBitsPerSecond: 128_000,
+        };
+
+        const recorder = new MediaRecorder(recordingMedia.stream, recorderOptions);
+        const recorderMimeType = recorder.mimeType || mimeType;
+        if (!recorderMimeType.toLowerCase().includes("webm")) {
+          throw new Error(`Unsupported recording format selected: ${recorderMimeType}`);
+        }
+        const recorderAudioTracks = getLiveAudioTracks(recordingMedia.stream);
+        if (!recorderAudioTracks.length) {
+          throw new Error("Microphone audio could not be attached to the video recorder.");
+        }
+        console.info("Exam video recorder started", {
+          mimeType: recorderMimeType,
+          audioTracks: recorderAudioTracks.map((track) => ({
+            label: track.label,
+            enabled: track.enabled,
+            muted: track.muted,
+            readyState: track.readyState,
+            settings: track.getSettings?.(),
+          })),
+          videoTracks: recordingMedia.stream.getVideoTracks().length,
         });
 
         mediaRecorderRef.current = recorder;
@@ -2242,14 +3384,19 @@ useEffect(() => {
         await new Promise((resolve) => setTimeout(resolve, 15000));
 
         if (recorder.state === "recording") {
-          recorder.stop();
-          
           const uploadSuccess = await new Promise<boolean>((resolve) => {
             recorder.onstop = async () => {
-              const videoBlob = new Blob(recordedChunksRef.current, { type: mimeType });
+              if (!recordedChunksRef.current.length) {
+                recordingMedia.cleanup();
+                resolve(false);
+                return;
+              }
+
+              const finalMimeType = recorderMimeType || mimeType || "video/webm;codecs=vp8,opus";
+              const videoBlob = new Blob(recordedChunksRef.current, { type: finalMimeType });
               const previewUrl = URL.createObjectURL(videoBlob);
-              const finalMimeType = videoBlob.type || mimeType;
-              const fileName = createMediaFileName("video", finalMimeType, minute);
+              const blobMimeType = videoBlob.type || finalMimeType;
+              const fileName = createMediaFileName("video", blobMimeType, minute);
               const success = await uploadToEvidenceAPI(videoBlob, "video", fileName);
 
               resolve(success);
@@ -2261,20 +3408,33 @@ useEffect(() => {
                   filename: fileName,
                   uploaded: success,
                   url: previewUrl,
-                  mimeType: finalMimeType,
+                  mimeType: blobMimeType,
                 },
               ]);
+              recordingMedia.cleanup();
             };
+
+            recorder.onerror = () => {
+              recordingMedia.cleanup();
+              resolve(false);
+            };
+            recorder.stop();
           });
 
           setTotalVideoChunks((prev) => prev + 1);
         }
       } catch (error) {
         console.error("Video recording failed:", error);
+        recordingMedia?.cleanup();
         processedVideoMinutesRef.current.delete(minute);
+        setErrorDetails(
+          error instanceof Error
+            ? error.message
+            : "Video with audio recording failed. Please check camera and microphone permissions.",
+        );
       }
     },
-    [createMediaFileName, examStarted, uploadToEvidenceAPI]
+    [createMediaFileName, examStarted, startCamera, uploadToEvidenceAPI]
   );
 
   useEffect(() => {
@@ -2323,9 +3483,9 @@ useEffect(() => {
   };
 
   const hasMinimumTimeElapsed = useCallback(() => {
-    const elapsedSeconds = (Date.now() - examStartTimeRef.current) / 1000;
+    const elapsedSeconds = Math.max(0, examDurationMinutes * 60 - timeRemaining);
     return elapsedSeconds >= minSubmitTime * 60;
-  }, [minSubmitTime]);
+  }, [examDurationMinutes, minSubmitTime, timeRemaining]);
 
   const isAnswerValid = () => {
     const current = questions[currentQuestion];
@@ -2416,7 +3576,7 @@ useEffect(() => {
   };
 
   const handleSubmit = () => {
-    if (!examStarted) return;
+    if (!examStarted || isSaving || examEndingRef.current) return;
 
     updateCurrentQuestionAnswer(selectedAnswer);
     const effectiveQuestions = getEffectiveQuestions();
@@ -2438,10 +3598,12 @@ useEffect(() => {
       return;
     }
 
-    setShowSubmitDialog(true);
+    void confirmSubmit();
   };
 
   const confirmSubmit = async () => {
+    if (isSaving || examEndingRef.current) return;
+
     examEndingRef.current = true;
     updateCurrentQuestionAnswer(selectedAnswer);
 
@@ -2452,11 +3614,9 @@ useEffect(() => {
     const saved = await saveAnswers(true, false);
     if (!saved) {
       examEndingRef.current = false;
-      setShowSubmitDialog(false);
       return;
     }
 
-    setShowSubmitDialog(false);
     setShowSubmitSuccessPopup(true);
 
     setTimeout(async () => {
@@ -2467,9 +3627,9 @@ useEffect(() => {
   const handleCancelTest = () => setShowCancelTestDialog(true);
 
   const confirmCancelTest = async () => {
-    examEndingRef.current = true;
     updateCurrentQuestionAnswer(selectedAnswer);
-    await saveAnswers(false, false);
+    await saveAnswers(false, false, true);
+    examEndingRef.current = true;
     await stopCameraAndRecording();
     setShowCancelTestDialog(false);
     await exitFullscreen();
@@ -2535,7 +3695,7 @@ useEffect(() => {
             setSelectedAnswer(value);
             updateCurrentQuestionAnswer(value);
           }}
-          className="space-y-3"
+          className="space-y-2.5"
         >
           {current.options.map((option, index) => {
             const value = String(index + 1);
@@ -2546,22 +3706,23 @@ useEffect(() => {
                 key={`${current.questionId}-${index}-${option}`}
                 type="button"
                 onClick={() => handleSingleChoiceSelect(index)}
-                className={`w-full p-4 border rounded-lg text-left transition-all ${
+                aria-pressed={selected}
+                className={`group flex min-h-[4rem] w-full items-center gap-4 rounded-xl border px-5 py-3 text-left transition-all ${
                   selected
                     ? "border-primary bg-primary/5 shadow-sm ring-1 ring-primary/20"
-                    : "border-slate-200 bg-white hover:bg-slate-50 hover:border-slate-300"
+                    : "border-slate-200 bg-white hover:border-primary/40 hover:bg-slate-50"
                 }`}
               >
-                <div className="flex items-center">
-                  <div
-                    className={`w-8 h-8 flex items-center justify-center rounded-full mr-3 text-sm font-semibold ${
-                      selected ? "bg-primary text-white" : "bg-slate-100 text-slate-700"
-                    }`}
-                  >
-                    {isTrueFalse ? (index === 0 ? "T" : "F") : String.fromCharCode(65 + index)}
-                  </div>
-                  <Label className="text-base cursor-pointer">{option}</Label>
-                </div>
+                <span
+                  className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
+                    selected ? "bg-primary text-white" : "bg-slate-100 text-slate-700 group-hover:bg-primary/10"
+                  }`}
+                >
+                  {isTrueFalse ? (index === 0 ? "T" : "F") : String.fromCharCode(65 + index)}
+                </span>
+                <span className="min-w-0 flex-1 text-base font-semibold leading-6 text-slate-950 break-words">
+                  {option}
+                </span>
               </button>
             );
           })}
@@ -2571,7 +3732,7 @@ useEffect(() => {
 
     if (current.type === 2) {
       return (
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           {current.options.map((option, index) => {
             const value = String(index + 1);
             const checked = Array.isArray(selectedAnswer) && selectedAnswer.includes(value);
@@ -2581,20 +3742,23 @@ useEffect(() => {
                 key={`${current.questionId}-${index}-${option}`}
                 type="button"
                 onClick={() => handleCheckboxChange(index, !checked)}
-                className={`w-full p-4 border rounded-lg text-left transition-all ${
+                aria-pressed={checked}
+                className={`group flex min-h-[4rem] w-full items-center gap-4 rounded-xl border px-5 py-3 text-left transition-all ${
                   checked
                     ? "border-primary bg-primary/5 shadow-sm ring-1 ring-primary/20"
-                    : "border-slate-200 bg-white hover:bg-slate-50 hover:border-slate-300"
+                    : "border-slate-200 bg-white hover:border-primary/40 hover:bg-slate-50"
                 }`}
               >
-                <div className="flex items-center">
-                  <Checkbox
-                    checked={checked}
-                    onCheckedChange={(isChecked) => handleCheckboxChange(index, Boolean(isChecked))}
-                    className="mr-3"
-                  />
-                  <Label className="text-base cursor-pointer">{option}</Label>
-                </div>
+                <span
+                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded border ${
+                    checked ? "border-primary bg-primary text-white" : "border-slate-300 bg-white"
+                  }`}
+                >
+                  {checked && <CheckCircle className="h-4 w-4" />}
+                </span>
+                <span className="min-w-0 flex-1 text-base font-semibold leading-6 text-slate-950 break-words">
+                  {option}
+                </span>
               </button>
             );
           })}
@@ -2625,6 +3789,9 @@ useEffect(() => {
 
   const renderQuestionButton = (question: UIQuestion, index: number, closeOnSelect = false) => {
     const isCurrent = currentQuestion === index;
+    const sizeClasses = closeOnSelect
+      ? "min-h-10 rounded-lg text-sm sm:min-h-11 sm:text-base"
+      : "min-h-9 rounded-md text-sm";
     const statusClasses = isCurrent
       ? "bg-primary text-white border-primary shadow-sm ring-2 ring-primary/20"
       : question.flagged
@@ -2642,7 +3809,7 @@ useEffect(() => {
           if (closeOnSelect) setShowMobileNav(false);
         }}
         aria-label={`Question ${question.id}${isCurrent ? ", current" : ""}`}
-        className={`relative flex aspect-square min-h-8 items-center justify-center rounded-md border text-xs font-semibold transition-all sm:text-sm ${statusClasses}`}
+        className={`relative flex aspect-square items-center justify-center border font-semibold transition-all ${sizeClasses} ${statusClasses}`}
       >
         {question.id}
         {question.flagged && !isCurrent && (
@@ -2654,57 +3821,27 @@ useEffect(() => {
 
   const renderQuestionNavigator = (isMobile = false) => (
     <div className={`rounded-lg border bg-white shadow-sm ${isMobile ? "p-4" : "p-3 sticky top-24"}`}>
-      <div className="mb-4 flex items-start justify-between gap-3">
+      <div className="mb-4 flex items-start justify-between gap-2">
         <div>
-          <h3 className="text-base font-semibold leading-none">Questions</h3>
+          <h3 className={`${isMobile ? "text-base" : "text-sm"} font-semibold leading-none`}>Questions</h3>
           <p className="mt-1 text-xs text-muted-foreground">
             {answeredCount}/{questions.length} answered
           </p>
         </div>
-        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
+        <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
           {questions.length} total
         </span>
       </div>
 
       <div
-        className={`grid gap-1.5 overflow-y-auto pr-1 ${isMobile ? "max-h-[55vh]" : "max-h-[360px]"}`}
-        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(2rem, 1fr))" }}
+        className={`grid overflow-y-auto pr-1 ${
+          isMobile ? "max-h-[55vh] gap-2" : "max-h-[430px] gap-1.5"
+        }`}
+        style={{ gridTemplateColumns: `repeat(auto-fit, minmax(${isMobile ? "2.65rem" : "2.25rem"}, 1fr))` }}
       >
         {questions.map((question, index) => renderQuestionButton(question, index, isMobile))}
       </div>
 
-      <div className="my-4 border-t" />
-
-      <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-        {navigatorStats.map((item) => (
-          <div key={item.label} className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className={`h-3 w-3 rounded-full ${item.className}`} />
-              <span className="truncate text-slate-700">{item.label}</span>
-            </div>
-            <span className="text-xs font-semibold text-slate-500">{item.value}</span>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-4">
-        <div className="mb-1.5 flex items-center justify-between text-sm">
-          <span className="text-muted-foreground">Progress</span>
-          <span className="font-semibold tabular-nums">{Math.round(progressPercentage)}%</span>
-        </div>
-        <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-          <div
-            className="h-full rounded-full bg-primary transition-all duration-500"
-            style={{ width: `${progressPercentage}%` }}
-          />
-        </div>
-      </div>
-
-      {lastSaveTime && (
-        <div className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-xs text-muted-foreground">
-          Last saved: {lastSaveTime.toLocaleTimeString()}
-        </div>
-      )}
     </div>
   );
 
@@ -2761,6 +3898,20 @@ useEffect(() => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-950">
+      {faceAlert && (
+        <div className="pointer-events-none fixed left-1/2 top-4 z-[80] w-[calc(100%-2rem)] max-w-md -translate-x-1/2">
+          <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 shadow-lg shadow-amber-100/70">
+            <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white text-amber-600">
+              <AlertTriangle className="h-4 w-4" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-bold leading-5">Warning</p>
+              <p className="mt-0.5 break-words text-xs font-medium leading-5">{faceAlert.message}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <Dialog
         open={showAutoSubmitPopup}
         onOpenChange={(open) => {
@@ -2788,30 +3939,6 @@ useEffect(() => {
       </Dialog>
 
       <Dialog
-        open={showTabSwitchWarning}
-        onOpenChange={(open) => {
-          if (!open) setShowTabSwitchWarning(false);
-        }}
-      >
-        <DialogContent className="sm:max-w-sm" onInteractOutside={(event) => event.preventDefault()}>
-          <div className="text-center py-5">
-            <div className="flex justify-center mb-4">
-              <div className="h-14 w-14 bg-amber-100 rounded-full flex items-center justify-center">
-                <AlertTriangle className="h-8 w-8 text-amber-600" />
-              </div>
-            </div>
-            <DialogTitle className="text-xl font-bold text-amber-700 mb-2">Tab Switch Warning</DialogTitle>
-            <DialogDescription className="text-base">
-              Tab switch detected ({tabSwitchWarningCount}). Please stay on the exam screen.
-            </DialogDescription>
-            <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-amber-100">
-              <div className="h-full w-full rounded-full bg-amber-500 animate-pulse" />
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
         open={showStartFullscreenDialog}
         onOpenChange={(open) => {
           if (!open && !examStarted) setShowStartFullscreenDialog(true);
@@ -2832,8 +3959,8 @@ useEffect(() => {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button className="w-full bg-red-600 hover:bg-red-700" onClick={startExam}>
-              Enter Fullscreen & Start Exam
+            <Button className="w-full bg-red-600 hover:bg-red-700" onClick={startExam} disabled={permissionRetrying}>
+              {permissionRetrying ? "Checking permissions..." : "Enter Fullscreen & Start Exam"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2842,13 +3969,20 @@ useEffect(() => {
       <Dialog
         open={showFullscreenWarning && !showFinalFullscreenWarning}
         onOpenChange={(open) => {
-          if (!open) {
+          if (!open && document.fullscreenElement) {
             setShowFullscreenWarning(false);
             setExamFrozen(false);
+            return;
           }
+
+          if (!open) setExamFrozen(true);
         }}
       >
-        <DialogContent className="sm:max-w-md" onInteractOutside={(event) => event.preventDefault()}>
+        <DialogContent
+          className="sm:max-w-md"
+          onInteractOutside={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => event.preventDefault()}
+        >
           <DialogHeader>
             <div className="flex items-center gap-3 text-red-600">
               <AlertTriangle className="h-8 w-8" />
@@ -2868,9 +4002,13 @@ useEffect(() => {
             <Button
               variant="destructive"
               onClick={async () => {
-                await requestFullscreen();
-                setShowFullscreenWarning(false);
-                setExamFrozen(false);
+                const isFullscreen = await requestFullscreen();
+                if (isFullscreen || document.fullscreenElement) {
+                  setShowFullscreenWarning(false);
+                  setExamFrozen(false);
+                } else {
+                  setExamFrozen(true);
+                }
               }}
               className="w-full"
             >
@@ -2883,10 +4021,20 @@ useEffect(() => {
       <Dialog
         open={showFinalFullscreenWarning}
         onOpenChange={(open) => {
-          if (!open && !examEndingRef.current) setShowFinalFullscreenWarning(false);
+          if (!open && !examEndingRef.current && document.fullscreenElement) {
+            setShowFinalFullscreenWarning(false);
+            setExamFrozen(false);
+            return;
+          }
+
+          if (!open && !examEndingRef.current) setExamFrozen(true);
         }}
       >
-        <DialogContent className="sm:max-w-md" onInteractOutside={(event) => event.preventDefault()}>
+        <DialogContent
+          className="sm:max-w-md"
+          onInteractOutside={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => event.preventDefault()}
+        >
           <DialogHeader>
             <div className="flex items-center gap-3 text-red-600">
               <AlertTriangle className="h-8 w-8" />
@@ -2906,9 +4054,13 @@ useEffect(() => {
             <Button
               variant="destructive"
               onClick={async () => {
-                await requestFullscreen();
-                setShowFinalFullscreenWarning(false);
-                setExamFrozen(false);
+                const isFullscreen = await requestFullscreen();
+                if (isFullscreen || document.fullscreenElement) {
+                  setShowFinalFullscreenWarning(false);
+                  setExamFrozen(false);
+                } else {
+                  setExamFrozen(true);
+                }
               }}
               className="w-full"
             >
@@ -2968,20 +4120,32 @@ useEffect(() => {
         </DialogContent>
       </Dialog>
 
-      {examFrozen && !document.fullscreenElement && examStarted && (
+      {examFrozen && examStarted && (
         <div className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center p-4">
           <div className="bg-card p-6 sm:p-8 rounded-xl border max-w-md w-full text-center shadow-2xl">
             <AlertTriangle className="h-16 w-16 text-red-500 mx-auto mb-4 animate-pulse" />
-            <h2 className="text-2xl font-bold mb-2">Exam Frozen</h2>
+            <h2 className="text-2xl font-bold mb-2">
+              {mediaPermissionBlocked ? "Camera & Microphone Required" : "Exam Frozen"}
+            </h2>
             <p className="text-muted-foreground mb-6 text-sm sm:text-base">
-              Please return to fullscreen mode to continue your exam.
+              {mediaPermissionBlocked
+                ? "Camera and microphone are required for video with voice recording. The exam timer will continue while this screen is frozen."
+                : "Please return to fullscreen mode to continue your exam."}
             </p>
             <Button
-              onClick={requestFullscreen}
+              onClick={handleFrozenRecovery}
+              disabled={permissionRetrying}
               className="bg-red-600 hover:bg-red-700 text-white px-8 py-3 text-lg w-full sm:w-auto"
             >
-              Return to Fullscreen
+              {permissionRetrying
+                ? "Checking permissions..."
+                : mediaPermissionBlocked
+                  ? "Allow Camera & Microphone"
+                  : "Return to Fullscreen"}
             </Button>
+            {mediaPermissionBlocked && errorDetails && (
+              <p className="mt-4 text-xs leading-5 text-red-600">{errorDetails}</p>
+            )}
           </div>
         </div>
       )}
@@ -2989,18 +4153,18 @@ useEffect(() => {
       {examStarted && (
         <>
           <div className="sticky top-0 z-40 border-b bg-white/95 backdrop-blur">
-            <div className="container mx-auto px-3 sm:px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="w-full px-4 sm:px-5 2xl:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2 sm:gap-3">
-                <Button variant="ghost" size="sm" className="lg:hidden" onClick={() => setShowMobileNav(!showMobileNav)}>
+                <Button variant="ghost" size="sm" className="xl:hidden" onClick={() => setShowMobileNav(!showMobileNav)}>
                   {showMobileNav ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
                 </Button>
                 <div className="h-10 w-10 rounded-lg bg-primary text-primary-foreground flex items-center justify-center">
                   <ShieldCheck className="h-5 w-5" />
                 </div>
                 <div>
-                  <div className="font-bold leading-tight">NursaQuiz</div>
+                  <div className="font-bold leading-tight">NurseQuiz</div>
                   <div className="hidden sm:block text-xs text-muted-foreground">
-                    {batchCode ? `Batch: ${batchCode}` : "Secure theory assessment"}
+                    {batchCode ? `Exam: ${batchCode}` : "Secure theory assessment"}
                     {batchDetails?.level ? ` | ${batchDetails.level}` : ""}
                   </div>
                 </div>
@@ -3039,7 +4203,7 @@ useEffect(() => {
           </div>
 
           {showMobileNav && (
-            <div className="lg:hidden fixed inset-0 bg-black/50 z-50" onClick={() => setShowMobileNav(false)}>
+            <div className="xl:hidden fixed inset-0 bg-black/50 z-50" onClick={() => setShowMobileNav(false)}>
               <div
                 className="absolute top-0 left-0 h-full w-4/5 max-w-sm bg-white p-4 overflow-y-auto shadow-2xl"
                 onClick={(event) => event.stopPropagation()}
@@ -3060,7 +4224,7 @@ useEffect(() => {
             </div>
           )}
 
-          <div className="container mx-auto px-3 sm:px-4 py-4 pb-24 lg:pb-6">
+          <div className="w-full px-4 sm:px-5 2xl:px-6 py-4 pb-24 lg:pb-6">
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
               <div className="rounded-lg border bg-white p-3 shadow-sm">
                 <div className="text-xs text-muted-foreground">Answered</div>
@@ -3104,14 +4268,14 @@ useEffect(() => {
                 </div>
               </div>
             </div>
-            <div className="flex flex-col lg:flex-row gap-4">
-              <div className="hidden lg:block lg:w-1/5 xl:w-1/6">
+            <div className="grid gap-5 xl:grid-cols-[12rem_minmax(0,1fr)_26rem] 2xl:grid-cols-[12.5rem_minmax(0,1fr)_30rem]">
+              <div className="hidden xl:block">
                 {renderQuestionNavigator()}
               </div>
 
-              <div className="flex-1 lg:w-3/5 xl:w-2/3">
-                <div className="bg-white p-4 sm:p-6 rounded-lg border shadow-sm">
-                  <div className="flex flex-wrap justify-between items-center gap-3 mb-4 sm:mb-6">
+              <div className="min-w-0">
+                <div className="bg-white p-4 sm:p-5 rounded-lg border shadow-sm">
+                  <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-lg sm:text-xl font-semibold">Question {currentQuestion + 1}</span>
                       <span className="text-xs bg-blue-50 text-blue-700 border border-blue-100 px-2 py-1 rounded-full whitespace-nowrap">
@@ -3139,18 +4303,18 @@ useEffect(() => {
                     </Button>
                   </div>
 
-                  <div className="rounded-lg border bg-slate-50 p-4 sm:p-5 mb-4 sm:mb-6">
+                  <div className="rounded-xl border bg-slate-50 p-4 sm:p-5 mb-4">
                     <div className="text-xs font-medium text-muted-foreground mb-2">
                       Question {currentQuestion + 1} of {questions.length}
                     </div>
-                    <h2 className="text-base sm:text-lg md:text-xl font-semibold break-words leading-relaxed">
+                    <h2 className="text-lg sm:text-xl font-semibold break-words leading-relaxed">
                       {questions[currentQuestion]?.question}
                     </h2>
                   </div>
 
-                  <div className="overflow-x-auto">{renderQuestionByType()}</div>
+                  <div className="min-w-0">{renderQuestionByType()}</div>
 
-                  <div className="flex flex-wrap justify-between items-center gap-3 pt-4 sm:pt-6 border-t mt-4 sm:mt-6">
+                  <div className="flex flex-wrap justify-between items-center gap-3 pt-4 border-t mt-4">
                     <div className="flex flex-wrap gap-2">
                       <Button variant="outline" size="sm" onClick={handlePreviousQuestion} disabled={currentQuestion === 0}>
                         Previous
@@ -3179,8 +4343,7 @@ useEffect(() => {
                       variant="destructive"
                       size="sm"
                       onClick={handleSubmit}
-                      disabled={flaggedCount > 0 || isSaving || !allQuestionsAnswered || !hasMinimumTimeElapsed()}
-                    >
+                      disabled={flaggedCount > 0 || isSaving || !allQuestionsAnswered || !hasMinimumTimeElapsed()} >
                       Submit Test
                     </Button>
                   </div>
@@ -3208,7 +4371,7 @@ useEffect(() => {
                 </div>
               </div>
 
-              <div className="lg:w-1/5 xl:w-1/6">
+              <div className="min-w-0">
                 <div className="bg-white rounded-lg border shadow-sm sticky top-24 overflow-hidden">
                   <div className="p-3 border-b flex items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -3221,20 +4384,20 @@ useEffect(() => {
                               : "bg-yellow-500"
                         }`}
                       />
-                      <h3 className="font-semibold text-xs sm:text-sm">AI Proctoring</h3>
+                      <h3 className="font-semibold text-sm sm:text-base">AI Proctoring</h3>
                     </div>
                     <span className="text-xs px-2 py-0.5 sm:py-1 rounded-md bg-slate-100">
                       {cameraState === "active" ? "Active" : cameraState === "error" ? "Error" : "Starting..."}
                     </span>
                   </div>
-                  <div className="p-3">
+                  <div className="p-4">
                     <div className="relative aspect-video border rounded-lg overflow-hidden bg-black mb-3">
                       <video
                         ref={videoRef}
                         autoPlay
                         muted
                         playsInline
-                        className="absolute inset-0 w-full h-full object-cover"
+                        className="absolute inset-0 h-full w-full object-contain"
                         style={{ display: cameraState === "active" ? "block" : "none" }}
                       />
                       {cameraState !== "active" && (
@@ -3249,26 +4412,53 @@ useEffect(() => {
                       )}
                     </div>
 
-                    {faceAlert && (
-                      <div className="flex gap-2 p-2 bg-yellow-50 rounded text-xs animate-pulse">
-                        <AlertTriangle className="w-3 h-3 text-yellow-600 shrink-0" />
-                        <span className="truncate text-xs">{faceAlert.message}</span>
-                        <span className="ml-auto text-xs font-mono shrink-0">{faceAlert.duration}s</span>
-                      </div>
-                    )}
-
                     <div className="mt-3 flex items-center gap-2 rounded-lg border bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
                       <ShieldCheck className="h-4 w-4" />
                       <span>{cameraState === "active" ? "Monitoring live" : "Monitoring pending"}</span>
                     </div>
 
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-slate-700">Team Verification</span>
+                        <span className="text-slate-500">6s</span>
+                      </div>
+                      {visibleMemberFaceStatuses.length > 0 ? (
+                        visibleMemberFaceStatuses.map((member) => {
+                          const isOk = member.status.toLowerCase() === "ok" && !member.alert;
+                          const toneClass = isOk
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                              : "border-slate-200 bg-slate-50 text-slate-600";
+                          const statusMessage = isOk ? member.message : "Monitoring";
+
+                          return (
+                            <div key={member.teamMemberId} className={`rounded border p-2 text-xs ${toneClass}`}>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="min-w-0 truncate font-medium">{member.name}</span>
+                                <span className="flex max-w-[58%] shrink-0 items-center justify-end gap-1 truncate text-right font-semibold capitalize">
+                                  {isOk ? (
+                                    <CheckCircle className="h-3 w-3" />
+                                  ) : (
+                                    <ShieldCheck className="h-3 w-3" />
+                                  )}
+                                  {statusMessage}
+                                </span>
+                              </div>
+                              {typeof member.score === "number" && (
+                                <p className="mt-1 text-[11px] opacity-80">Score {member.score.toFixed(3)}</p>
+                              )}
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <div className="rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-500">
+                          Loading team members
+                        </div>
+                      )}
                     </div>
 
                     {(recordedVideos.some(v => v.uploaded) || capturedSelfies.some(s => s.uploaded)) && (
                       <div className="mt-3 text-xs text-center text-green-600">
-                        ✓ Evidence uploaded successfully
+              
                       </div>
                     )}
                   </div>
@@ -3302,31 +4492,6 @@ useEffect(() => {
                   className="w-full sm:w-auto"
                 >
                   Go to First Unanswered
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-
-          <Dialog open={showSubmitDialog} onOpenChange={setShowSubmitDialog}>
-            <DialogContent className="sm:max-w-md">
-              <DialogHeader>
-                <DialogTitle>Submit Exam</DialogTitle>
-                <DialogDescription className="space-y-2">
-                  <p>
-                    {answeredCount} of {questions.length} questions answered.
-                  </p>
-                  <p>
-                    {recordedVideos.filter(v => v.uploaded).length} videos recorded. {capturedSelfies.filter(s => s.uploaded).length} photos captured.
-                  </p>
-                  <p className="font-semibold text-red-600">This action cannot be undone.</p>
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter className="flex-col sm:flex-row gap-2">
-                <Button variant="outline" onClick={() => setShowSubmitDialog(false)} className="w-full sm:w-auto">
-                  Cancel
-                </Button>
-                <Button variant="destructive" onClick={confirmSubmit} disabled={isSaving} className="w-full sm:w-auto">
-                  {isSaving ? "Submitting..." : "Submit Exam"}
                 </Button>
               </DialogFooter>
             </DialogContent>

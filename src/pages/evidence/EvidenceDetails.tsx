@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   Camera,
   ChevronLeft,
@@ -24,22 +25,26 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { FaceWarningsViewer } from "@/components/FaceWarningsViewer";
 import { BASE_URL1 } from "@/Service/api";
 import { buildCandidateEvidenceBase,
   CompactInfoCard,
   demoVideoPoster,
+  deriveCandidateResponseOverview,
   EmptyState,
   fetchCandidateEvidence,
+  fetchCandidateResponsesPayload,
   fetchJson,
   fetchRandomEvidenceMedia,
   formatCaptureDate,
   formatCaptureTime,
   formatDateTime,
+  formatDuration,
   formatStatus,
   getCandidateId,
   getTimestampValue,
   isRenderableImage,
-  MetricCard,
+  LocationAddress,
   SectionHeader,
   toneIconClass,
   type EvidenceRouteState,
@@ -167,7 +172,7 @@ const createIdentityLightboxItems = (card: IdentityMemberCard) => {
   if (card.selfie?.url) {
     items.push({
       id: `${card.key}-selfie`,
-      title: `${card.name} - Doc 1 Selfie`,
+      title: `${card.name} - Selfie`,
       subtitle: `${card.email || "Selfie evidence"} - Captured ${formatDateTime(card.selfie.timestamp || null)}`,
       url: card.selfie.url,
       kind: "image",
@@ -177,7 +182,7 @@ const createIdentityLightboxItems = (card: IdentityMemberCard) => {
   if (card.document?.url) {
     items.push({
       id: `${card.key}-document`,
-      title: `${card.name} - Doc 2 Document`,
+      title: `${card.name} - Document`,
       subtitle: `${card.email || "Document evidence"} - Captured ${formatDateTime(card.document.timestamp || null)}`,
       url: card.document.url,
       kind: isRenderableImage(card.document.url) ? "image" : "document",
@@ -206,6 +211,52 @@ const attachTeamMemberNames = (items: EvidenceViewData["media"], teamMembers: Te
     ...item,
     memberName: resolveMediaMemberName(item, teamMembers),
   }));
+
+const getExamStatusLabel = (value: unknown) => {
+  const normalized = String(value || "").replace(/[_\-\s]+/g, "").toLowerCase();
+
+  if (/(complete|completed|submitted|submit|finish|finished|done)/.test(normalized)) return "Completed";
+  if (/(notstarted|pending|enrolled|new|notattempted)/.test(normalized)) return "Not Started";
+  if (/(progress|started|start|running|ongoing|live|attempt)/.test(normalized)) return "In Progress";
+
+  return "Not Started";
+};
+
+const ExamSummaryItem = ({
+  label,
+  value,
+  icon: Icon,
+  tone = "sky",
+}: {
+  label: string;
+  value: ReactNode;
+  icon: typeof Clock;
+  tone?: "sky" | "emerald" | "amber" | "rose";
+}) => (
+  <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 shadow-sm">
+    <div className="flex min-h-[52px] items-center gap-2.5">
+      <span
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+          tone === "emerald"
+            ? "bg-emerald-50 text-emerald-700"
+            : tone === "amber"
+              ? "bg-amber-50 text-amber-700"
+              : tone === "rose"
+                ? "bg-rose-50 text-rose-700"
+                : "bg-sky-50 text-sky-700"
+        }`}
+      >
+        <Icon className="h-3.5 w-3.5" />
+      </span>
+      <div className="min-w-0">
+        <p className="text-[10px] font-bold uppercase leading-3 tracking-[0.06em] text-slate-500">{label}</p>
+        <p className="mt-0.5 break-words text-[12px] font-bold leading-4 text-slate-950" title={String(value || "")}>
+          {value === 0 ? "0" : value || "Not available"}
+        </p>
+      </div>
+    </div>
+  </div>
+);
 
 const getMediaKey = (item: EvidenceViewData["media"][number]) =>
   String(item.id || `${item.type}-${item.memberId || "member"}-${item.filename}-${item.url || ""}`);
@@ -385,6 +436,12 @@ const EvidenceLightbox = ({
                 ref={videoRef}
                 src={item.url}
                 controls
+                muted={false}
+                preload="metadata"
+                onLoadedMetadata={(event) => {
+                  event.currentTarget.muted = false;
+                  event.currentTarget.volume = 1;
+                }}
                 className="max-h-full w-full max-w-6xl rounded-xl bg-black object-contain shadow-2xl"
               />
             ) : item.kind === "image" ? (
@@ -421,45 +478,90 @@ const EvidenceLightbox = ({
 
 const EvidenceOnlyView = ({
   evidence,
-  selfieItems,
   identityCards,
   photoItems,
   videoItems,
   photoCount,
   videoCount,
-  documentCount,
-  teamMembers,
   loadingTeam,
   teamError,
+  faceWarningsPanel,
   onOpenLightbox,
 }: {
   evidence: EvidenceViewData;
-  selfieItems: EvidenceViewData["identity"]["documents"];
   identityCards: IdentityMemberCard[];
   photoItems: EvidenceViewData["media"];
   videoItems: EvidenceViewData["media"];
   photoCount: number;
   videoCount: number;
-  documentCount: number;
-  teamMembers: TeamMember[];
   loadingTeam: boolean;
   teamError: string;
+  faceWarningsPanel?: ReactNode;
   onOpenLightbox: (items: LightboxItem[], index: number) => void;
 }) => (
   <div className="space-y-4">
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-      <MetricCard icon={User} label="Selfies" value={selfieItems.length} detail="Member identity selfies." tone={selfieItems.length ? "emerald" : "amber"} />
-      <MetricCard icon={Users} label="Team" value={loadingTeam ? "Loading" : teamMembers.length} detail="Linked team members." tone="sky" />
-      <MetricCard icon={FileText} label="Documents" value={documentCount} detail="Identity and registration proof." tone="sky" />
-      <MetricCard icon={Camera} label="Photos" value={photoCount} detail="Random exam captures." tone="cyan" />
-      <MetricCard icon={Video} label="Videos" value={videoCount} detail="Recorded proctoring clips." tone="rose" />
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_28rem]">
+      <section className="overflow-hidden rounded-2xl border border-sky-100 bg-white shadow-sm">
+        <div className="border-b border-sky-100 bg-sky-50/60 px-4 py-4">
+          <SectionHeader
+            icon={ShieldCheck}
+            title="Exam Attempt Summary"
+            description="Exam timing, submission, and location captured during the attempt."
+          />
+        </div>
+        <div className="grid gap-4 p-4">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <ExamSummaryItem
+              icon={Clock}
+              label="Total Time"
+              value={formatDuration(Number(evidence.overview.theoryTimeSeconds) || 0)}
+              tone="emerald"
+            />
+            <ExamSummaryItem
+              icon={Clock}
+              label="Started"
+              value={formatDateTime(evidence.overview.startedAt)}
+              tone="amber"
+            />
+            <ExamSummaryItem
+              icon={AlertTriangle}
+              label="Tab Switch"
+              value={Number(evidence.overview.tabSwitchCount) || 0}
+              tone="rose"
+            />
+            <ExamSummaryItem
+              icon={Clock}
+              label="Submitted"
+              value={formatDateTime(evidence.overview.submittedAt)}
+            />
+          </div>
+          <div className="max-w-3xl rounded-xl border border-sky-100 bg-gradient-to-br from-white to-sky-50/60 p-4">
+            <div className="mb-3 flex items-center gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-100 text-sky-700">
+                <Layers className="h-4 w-4" />
+              </span>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Location</p>
+                <p className="text-xs text-slate-500">Resolved from candidate response coordinates</p>
+              </div>
+            </div>
+            <div className="text-sm font-semibold leading-6 text-slate-950">
+              <LocationAddress overview={evidence.overview} />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside className="space-y-3">
+        {faceWarningsPanel}
+      </aside>
     </div>
 
     <section className="rounded-2xl border border-sky-100 bg-white p-4 shadow-sm">
       <SectionHeader
         icon={FileText}
         title="Candidate Identity Documents"
-        description="Doc 1 selfie and Doc 2 document are grouped into one card for each member."
+        description="Selfie and document are grouped into one card for each member."
       />
 
       {teamError && (
@@ -508,9 +610,8 @@ const EvidenceOnlyView = ({
                       <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-sky-700">
                         <User className="h-4 w-4" />
                       </span>
-                      <p className="truncate text-sm font-semibold text-slate-900">Doc 1 Selfie</p>
+                      <p className="truncate text-sm font-semibold text-slate-900">Selfie</p>
                     </div>
-                    <span className="rounded-full bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700">Doc 1</span>
                   </div>
 
                   {card.selfie?.url ? (
@@ -552,9 +653,8 @@ const EvidenceOnlyView = ({
                       <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-cyan-100 text-cyan-700">
                         <FileText className="h-4 w-4" />
                       </span>
-                      <p className="truncate text-sm font-semibold text-slate-900">Doc 2 Document</p>
+                      <p className="truncate text-sm font-semibold text-slate-900">Document</p>
                     </div>
-                    <span className="rounded-full bg-cyan-50 px-2 py-1 text-[11px] font-semibold text-cyan-700">Doc 2</span>
                   </div>
 
                   {card.document?.url && isRenderableImage(card.document.url) ? (
@@ -643,7 +743,17 @@ const EvidenceOnlyView = ({
                     className="h-56 w-full rounded-lg bg-slate-50 object-contain shadow-sm sm:h-64"
                   />
                 ) : item.type === "video" && item.url ? (
-                  <video src={item.url} controls className="h-56 w-full rounded-lg bg-black object-contain sm:h-64" />
+                  <video
+                    src={item.url}
+                    controls
+                    muted={false}
+                    preload="metadata"
+                    onLoadedMetadata={(event) => {
+                      event.currentTarget.muted = false;
+                      event.currentTarget.volume = 1;
+                    }}
+                    className="h-56 w-full rounded-lg bg-black object-contain sm:h-64"
+                  />
                 ) : (
                   <div
                     className="flex aspect-[4/3] items-center justify-center rounded-lg border border-dashed border-sky-200 bg-white"
@@ -729,7 +839,17 @@ const EvidenceOnlyView = ({
 
               <div className="p-3">
                 {item.url ? (
-                  <video src={item.url} controls className="h-56 w-full rounded-lg bg-black object-contain sm:h-64" />
+                  <video
+                    src={item.url}
+                    controls
+                    muted={false}
+                    preload="metadata"
+                    onLoadedMetadata={(event) => {
+                      event.currentTarget.muted = false;
+                      event.currentTarget.volume = 1;
+                    }}
+                    className="h-56 w-full rounded-lg bg-black object-contain sm:h-64"
+                  />
                 ) : (
                   <div
                     className="flex aspect-[4/3] items-center justify-center rounded-lg border border-dashed border-sky-200 bg-white"
@@ -820,10 +940,15 @@ const EvidenceDetailsPage = ({ userId }: { userId: number }) => {
     setLoadingTeam(true);
     setError("");
     setTeamError("");
+    setEvidence(buildCandidateEvidenceBase(userId, routeState.candidate, routeState.batch, "Evidence API"));
+    setTeamMembers([]);
+    setLightbox(null);
 
-    const [evidenceResult, teamResult] = await Promise.allSettled([
+    const routeCandidateId = getCandidateId(routeState.candidate);
+    const [evidenceResult, teamResult, responseResult] = await Promise.allSettled([
       fetchCandidateEvidence(userId, routeState.candidate, routeState.batch, location.state),
       fetchCandidateTeamMembers(userId),
+      fetchCandidateResponsesPayload([routeCandidateId || 0, userId]),
     ]);
     const resolvedTeamMembers = teamResult.status === "fulfilled" ? teamResult.value : [];
     const randomMediaMemberIds = buildRandomMediaMemberIds(routeState, resolvedTeamMembers);
@@ -835,7 +960,14 @@ const EvidenceDetailsPage = ({ userId }: { userId: number }) => {
     );
 
     if (evidenceResult.status === "fulfilled") {
-      setEvidence(mergeMediaItems(evidenceResult.value, randomMedia));
+      const responseOverview = responseResult.status === "fulfilled"
+        ? deriveCandidateResponseOverview(responseResult.value, evidenceResult.value.overview)
+        : evidenceResult.value.overview;
+
+      setEvidence(mergeMediaItems({
+        ...evidenceResult.value,
+        overview: responseOverview,
+      }, randomMedia));
     } else {
       setError(evidenceResult.reason instanceof Error ? evidenceResult.reason.message : "Failed to load evidence details");
     }
@@ -859,8 +991,8 @@ const EvidenceDetailsPage = ({ userId }: { userId: number }) => {
   };
 
   useEffect(() => {
-    loadEvidence();
-  }, [userId]);
+    void loadEvidence();
+  }, [userId, location.key]);
 
   const selfieItems =
     evidence.identity.selfies.length > 0
@@ -895,6 +1027,19 @@ const EvidenceDetailsPage = ({ userId }: { userId: number }) => {
   const batchId = evidence.candidate.batchId || routeState.candidate?.batchId || routeState.candidate?.batch_id || routeState.batch?.batch_id || routeState.batch?.id || null;
   const level = evidence.candidate.level || routeState.batch?.level || "--";
   const totalEvidenceItems = selfieItems.length + documentCount + photoCount + videoCount;
+  const hasExamAttemptEvidence =
+    evidence.responses.length > 0 ||
+    Boolean(evidence.overview.submittedAt) ||
+    Number(evidence.overview.theoryTimeSeconds) > 0 ||
+    Number(evidence.overview.tabSwitchCount) > 0 ||
+    totalEvidenceItems > 0;
+  const resolvedExamStatus = getExamStatusLabel(
+    routeState.candidate?.examStatus ||
+    routeState.candidate?.quizStatus ||
+    routeState.candidate?.resultStatus ||
+    evidence.overview.status
+  );
+  const examStatus = resolvedExamStatus === "In Progress" && !hasExamAttemptEvidence ? "Not Started" : resolvedExamStatus;
 
   return (
     <div className="min-h-screen bg-[#f3fbff] text-slate-900">
@@ -909,19 +1054,15 @@ const EvidenceDetailsPage = ({ userId }: { userId: number }) => {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Evidence Details</h1>
-                    <span className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-sky-700">
-                      <ShieldCheck className="h-3.5 w-3.5" />
-                      User ID {userId}
-                    </span>
                   </div>
                   <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">
-                    Identity documents, selfie, team members, and proctoring captures for the selected candidate.
+                    Candidate identity evidence, exam timing, location, and monitoring events for the selected organization.
                   </p>
                 </div>
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => navigate("/Evidence")} className="border-sky-200 bg-white text-sky-700 hover:bg-sky-50">
+                <Button variant="outline" size="sm" onClick={() => navigate("/Evidence", { state: routeState.backState || routeState })} className="border-sky-200 bg-white text-sky-700 hover:bg-sky-50">
                   <ArrowLeft className="h-4 w-4" />
                   Back
                 </Button>
@@ -933,15 +1074,6 @@ const EvidenceDetailsPage = ({ userId }: { userId: number }) => {
             </div>
           </div>
 
-          <div className="grid gap-3 bg-sky-50/40 px-4 py-4 sm:px-6 md:grid-cols-2 xl:grid-cols-7">
-            <CompactInfoCard icon={User} label="Candidate" value={evidence.candidate.name} tone="sky" />
-            <CompactInfoCard icon={ShieldCheck} label="User ID" value={userId} tone="cyan" />
-            <CompactInfoCard icon={Layers} label="Batch ID" value={batchId} tone="cyan" />
-            <CompactInfoCard icon={Layers} label="Batch" value={evidence.candidate.batchCode} tone="sky" />
-            <CompactInfoCard icon={ClipboardList} label="Level" value={level} tone="slate" />
-            <CompactInfoCard icon={CheckCircle2} label="Status" value={formatStatus(evidence.overview.status)} tone="emerald" />
-            <CompactInfoCard icon={FileText} label="Evidence Items" value={totalEvidenceItems} tone="cyan" />
-          </div>
         </div>
 
         {error && (
@@ -962,16 +1094,24 @@ const EvidenceDetailsPage = ({ userId }: { userId: number }) => {
           <div className="mt-4">
             <EvidenceOnlyView
               evidence={evidence}
-              selfieItems={selfieItems}
               identityCards={identityCards}
               photoItems={photoItems}
               videoItems={videoItems}
               photoCount={photoCount}
               videoCount={videoCount}
-              documentCount={documentCount}
-              teamMembers={teamMembers}
               loadingTeam={loadingTeam}
               teamError={teamError}
+              faceWarningsPanel={
+                batchId && userId ? (
+                  <FaceWarningsViewer
+                    userId={userId}
+                    candidateId={getCandidateId(routeState.candidate) || undefined}
+                    batchId={Number(batchId)}
+                    batchCode={evidence.candidate.batchCode}
+                    maxDurationSeconds={Number(evidence.overview.theoryTimeSeconds) || undefined}
+                  />
+                ) : null
+              }
               onOpenLightbox={openLightbox}
             />
           </div>

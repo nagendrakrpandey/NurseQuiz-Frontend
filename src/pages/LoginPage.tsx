@@ -6,10 +6,11 @@ import { Label } from "@/components/ui/label";
 import { Stethoscope, ArrowRight, ShieldCheck, GraduationCap, Eye, EyeOff, Heart } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import bg from "@/assets/e1.jpg";
-import { BASE_URL } from "@/Service/api";
+import { BASE_URL, saveAuthTokens } from "@/Service/api";
 import {
   clearAuthSession,
   getPostLoginRoute,
+  getStoredLoginStatus,
   getStoredRoleId,
   hasAuthSession,
   markSessionActivity,
@@ -18,11 +19,12 @@ import {
 // 🔥 STORAGE MANAGEMENT FUNCTIONS
 const StorageManager = {
   saveUserData: (userData) => {
-    localStorage.setItem("token", userData.token);
+    saveAuthTokens(userData.token, userData.refreshToken || userData.refresh_token);
     localStorage.setItem("email", userData.email);
     localStorage.setItem("userId", userData.id);
     if (userData.candidateId) {
       localStorage.setItem("candidateId", userData.candidateId);
+      
     } else {
       localStorage.removeItem("candidateId");
     }
@@ -30,6 +32,11 @@ const StorageManager = {
     localStorage.setItem("roleId", userData.roleId);
     localStorage.setItem("loginStatus", userData.loginStatus);
     localStorage.setItem("contact", userData.contact);
+    if (userData.refreshToken || userData.refresh_token) {
+      localStorage.setItem("refreshToken", userData.refreshToken || userData.refresh_token);
+    } else {
+      localStorage.removeItem("refreshToken");
+    }
 
     if (userData.batchId) {
       localStorage.setItem("batchId", String(userData.batchId));
@@ -68,6 +75,7 @@ const StorageManager = {
   getUserData: () => {
     return {
       token: localStorage.getItem("token"),
+      
       email: localStorage.getItem("email"),
       userId: localStorage.getItem("userId"),
       candidateId: localStorage.getItem("candidateId"),
@@ -98,10 +106,15 @@ const LoginPage = () => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const alreadyAuthenticated = hasAuthSession();
 
   useEffect(() => {
-    clearAuthSession("manual");
-  }, []);
+    if (alreadyAuthenticated) {
+      navigate(getPostLoginRoute(getStoredRoleId(), getStoredLoginStatus()), { replace: true });
+    }
+  }, [alreadyAuthenticated, navigate]);
+
+  if (alreadyAuthenticated) return null;
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -147,6 +160,7 @@ const LoginPage = () => {
 
         const userData = {
           token: result.token,
+          refreshToken: result.refreshToken || result.refresh_token || "",
           id: result.id,
           candidateId,
           candidateIdSource: candidateId ? "backend" : null,

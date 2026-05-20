@@ -70,6 +70,20 @@ export interface DashboardResponse {
   currentLevelIndex?: number;
   progressPercentage?: number;
   nextExamDate?: string;
+  startDate?: string;
+  start_date?: string;
+  examStartDate?: string;
+  startTime?: string;
+  start_time?: string;
+  examStartTime?: string;
+  exam_start_time?: string;
+  endDate?: string;
+  end_date?: string;
+  examEndDate?: string;
+  endTime?: string;
+  end_time?: string;
+  examEndTime?: string;
+  exam_end_time?: string;
   quizAvailable?: boolean;
   levelDates?: Record<string, string>;
   notifications?: DashboardNotification[];
@@ -114,6 +128,7 @@ export interface DashboardExamResult {
   submitted?: boolean;
   completed?: boolean;
   inProgress?: boolean;
+  started?: boolean;
 }
 
 export class DashboardRequestError extends Error {
@@ -246,6 +261,40 @@ const unwrapApiData = (payload: unknown): Record<string, unknown> => {
   return record;
 };
 
+const getRecordTime = (record: Record<string, unknown>) => {
+  const value = readApiField(record, [
+    "submittedAt",
+    "submitted_at",
+    "updatedAt",
+    "updated_at",
+    "createdAt",
+    "created_at",
+  ]);
+  const time = value ? new Date(String(value)).getTime() : Number.NaN;
+  return Number.isFinite(time) ? time : 0;
+};
+
+const pickLatestApiRecord = (payload: unknown): Record<string, unknown> => {
+  const data = unwrapApiData(payload);
+
+  if (Array.isArray(data)) {
+    const records = data.filter((item) => item && typeof item === "object") as Record<string, unknown>[];
+    if (!records.length) return {};
+
+    return [...records].sort((first, second) => {
+      const secondId = Number(readApiField(second, ["id", "resultId", "result_id"]) || 0);
+      const firstId = Number(readApiField(first, ["id", "resultId", "result_id"]) || 0);
+      const idDiff =
+        (Number.isFinite(secondId) ? secondId : 0) - (Number.isFinite(firstId) ? firstId : 0);
+      if (idDiff !== 0) return idDiff;
+
+      return getRecordTime(second) - getRecordTime(first);
+    })[0];
+  }
+
+  return data;
+};
+
 const readApiField = (record: Record<string, unknown>, aliases: string[]) => {
   const normalizedAliases = aliases.map((alias) => alias.replace(/[_\-\s]/g, "").toLowerCase());
   return Object.entries(record).find(([key]) =>
@@ -263,19 +312,8 @@ export const normalizeExamStage = (value?: string | number | null) => {
   return normalized.replace(/[\s-]+/g, "_");
 };
 
-const completedExamStatusCodes = new Set([
-  "SUBMITTED",
-  "COMPLETED",
-  "FINISHED",
-  "PASS",
-  "PASSED",
-  "FAIL",
-  "FAILED",
-  "SELECTED",
-  "NOTSELECTED",
-  "QUALIFIED",
-  "NOTQUALIFIED",
-]);
+const completedExamStatusCodes = new Set(["SUBMITTED", "COMPLETED", "FINISHED"]);
+const inProgressExamStatusCodes = new Set(["INPROGRESS", "STARTED", "ONGOING"]);
 
 export const fetchDashboardExamResult = async (signal?: AbortSignal): Promise<DashboardExamResult | null> => {
   const token = getStoredAuthToken();
@@ -302,14 +340,35 @@ export const fetchDashboardExamResult = async (signal?: AbortSignal): Promise<Da
     throw new DashboardRequestError(message, response.status);
   }
 
-  const data = unwrapApiData(result);
+  const data = pickLatestApiRecord(result);
   if (!Object.keys(data).length) return null;
 
-  const status = String(readApiField(data, ["examStatus", "quizStatus", "status"]) || "").trim();
+  const status = String(readApiField(data, ["examStatus", "exam_status", "quizStatus", "quiz_status", "status"]) || "").trim();
   const resultStatus = String(readApiField(data, ["resultStatus", "passStatus", "result"]) || "").trim();
   const message = String(readApiField(data, ["message"]) || "").trim();
-  const normalizedStatus = normalizeStatusCode(status || resultStatus || message);
+  const normalizedStatus = normalizeStatusCode(status);
   const isCompleted = completedExamStatusCodes.has(normalizedStatus) || /already.*submit/i.test(message);
+  const attemptedQuestions = readDashboardNumber(
+    toNumberOrString(readApiField(data, ["attemptedQuestions", "attempted", "answeredQuestions"])),
+  );
+  const responseCount = readDashboardNumber(
+    toNumberOrString(readApiField(data, ["responseCount", "responsesCount", "answersCount"])),
+  );
+  const totalTimeTaken = readDashboardNumber(
+    toNumberOrString(readApiField(data, ["totalTimeTaken", "timeTaken", "elapsedTime"])),
+  );
+  const startedAt = String(
+    readApiField(data, ["startedAt", "examStartedAt", "examStartAt", "attemptStartedAt"]) || "",
+  ).trim();
+  const startedFlag = normalizeStatusCode(
+    String(readApiField(data, ["examStarted", "hasStarted", "isStarted", "startedByCandidate"]) ?? ""),
+  );
+  const hasStarted =
+    (attemptedQuestions ?? 0) > 0 ||
+    (responseCount ?? 0) > 0 ||
+    (totalTimeTaken ?? 0) > 0 ||
+    Boolean(startedAt && Number.isFinite(new Date(startedAt).getTime())) ||
+    ["TRUE", "YES", "Y", "1", "STARTED"].includes(startedFlag);
 
   return {
     currentStage: String(readApiField(data, ["currentStage", "stage"]) || "").trim() || undefined,
@@ -321,7 +380,8 @@ export const fetchDashboardExamResult = async (signal?: AbortSignal): Promise<Da
     message: message || undefined,
     submitted: isCompleted,
     completed: isCompleted,
-    inProgress: ["INPROGRESS", "STARTED", "ONGOING"].includes(normalizedStatus),
+    started: hasStarted,
+    inProgress: inProgressExamStatusCodes.has(normalizedStatus) || (hasStarted && !isCompleted),
   };
 };
 
@@ -333,7 +393,12 @@ export const mergeDashboardExamResult = (
 
   const completed = Boolean(examResult.completed || examResult.submitted);
   const inProgress = Boolean(examResult.inProgress) && !completed;
-  const examStatus = completed ? "COMPLETED" : inProgress ? "IN_PROGRESS" : examResult.examStatus || dashboardData.examStatus || "NOT_STARTED";
+  const resultStatus = normalizeStatusCode(examResult.examStatus || examResult.status);
+  const examStatus = completed
+    ? "COMPLETED"
+    : inProgress || inProgressExamStatusCodes.has(resultStatus)
+      ? "IN_PROGRESS"
+      : "NOT_STARTED";
 
   return {
     ...dashboardData,
@@ -444,7 +509,7 @@ const readDashboardNumber = (...values: Array<string | number | null | undefined
 
 export const DASHBOARD_QUALIFYING_PERCENTAGE = 35;
 
-const DEFAULT_COMPETITION_LEVELS = ["District", "State", "National"];
+const DEFAULT_COMPETITION_LEVELS = ["District", "Regional", "State"];
 
 const normalizeAlias = (value: string) => value.replace(/[_\-\s]/g, "").toLowerCase();
 
@@ -563,6 +628,12 @@ export const getDashboardResponseScoreSummary = (
 ): DashboardScoreSummary | null => {
   if (!responses.length) return null;
 
+  const hasInProgressResponse = responses.some((row) =>
+    ["IN_PROGRESS", "INPROGRESS", "STARTED", "ONGOING"].includes(
+      normalizeStatusCode(readResponseText(row, ["examStatus", "quizStatus", "status", "resultStatus"]))
+    )
+  );
+
   const attemptedQuestions = responses.filter((row) =>
     isAttemptedAnswer(readResponseText(row, ["ansId", "answerId", "selectedOption", "responseId"])),
   ).length;
@@ -577,7 +648,7 @@ export const getDashboardResponseScoreSummary = (
     percentage,
     attemptedQuestions,
     totalQuestions,
-    completed: attemptedQuestions > 0 && totalQuestions > 0 && attemptedQuestions >= totalQuestions,
+    completed: !hasInProgressResponse && attemptedQuestions > 0 && totalQuestions > 0 && attemptedQuestions >= totalQuestions,
   };
 };
 
@@ -648,9 +719,9 @@ export const mergeDashboardScoreSummary = (
     scorePercentage: scoreSummary.percentage,
     attemptedQuestions: scoreSummary.attemptedQuestions,
     totalQuestions: scoreSummary.totalQuestions,
-    quizStatus: scoreSummary.completed ? "COMPLETED" : dashboardData.quizStatus,
-    examStatus: scoreSummary.completed ? "COMPLETED" : dashboardData.examStatus,
-    status: scoreSummary.completed ? "COMPLETED" : dashboardData.status,
+    quizStatus: scoreSummary.completed ? "COMPLETED" : scoreSummary.attemptedQuestions > 0 ? "IN_PROGRESS" : dashboardData.quizStatus,
+    examStatus: scoreSummary.completed ? "COMPLETED" : scoreSummary.attemptedQuestions > 0 ? "IN_PROGRESS" : dashboardData.examStatus,
+    status: scoreSummary.completed ? "COMPLETED" : scoreSummary.attemptedQuestions > 0 ? "IN_PROGRESS" : dashboardData.status,
   };
 };
 
@@ -958,6 +1029,18 @@ export const applyDashboardExamCompletionOverride = (
   userId: number | string | null,
 ) => {
   const override = getDashboardExamCompletionOverride(userId);
+  const explicitStatus = normalizeStatusCode(
+    dashboardData.examStatus || dashboardData.quizStatus || dashboardData.status,
+  );
+
+  if (
+    override &&
+    ["INPROGRESS", "NOTSTARTED", "SCHEDULED", "ABSENT"].includes(explicitStatus)
+  ) {
+    localStorage.removeItem(DASHBOARD_EXAM_COMPLETION_KEY);
+    return dashboardData;
+  }
+
   const completed = Boolean(override) || isDashboardQuizCompleted(dashboardData);
   if (!completed) return dashboardData;
 
@@ -1000,9 +1083,13 @@ const LABEL_OVERRIDES: Record<string, string> = {
   DISTRICT: "District",
   STATE: "State",
   REGIONAL: "Regional",
-  NATIONAL: "National",
+  NATIONAL: "Regional",
+  DISTRICT_LEVEL: "District Level",
+  DISTRICTLEVEL: "District Level",
   NOT_STARTED: "Not Started",
   IN_PROGRESS: "In Progress",
+  SCHEDULED: "Scheduled",
+  ABSENT: "Absent",
   COMPLETED: "Completed",
   SELECTED: "Selected",
   WINNER: "Winner",
